@@ -35,7 +35,7 @@ These install into `/usr/local/games`.
 Caldera issued a free licence in 2002 covering the 'ancient UNIX' code including version 7.
 This licence allows use, modification and distribution of the code.
 
-Any original work here is licenced under the MIT Licence.
+Any original work here is licenced under the BSD 2 clause licence.
 
 *Build Instructions*
 
