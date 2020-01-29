@@ -1,0 +1,780 @@
+/*	find	COMPILE:	cc -o find -s -O -i find.c -lS	*/
+
+#pragma debug 8+64 /* No ORCA/C stack fixup */
+
+#include <stdio.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <stdio.h>
+#include <errno.h>
+#include <sys/param.h>
+
+#define FNAMELEN 255
+
+#define A_DAY	86400L /* a day full of seconds */
+#define EQ(x, y)	(strcmp(x, y)==0)
+
+time_t time(time_t*);
+
+
+struct anode {
+	int (*F)(void *);
+	void *L, *R;
+} Node[100];
+
+int	Randlast;
+char	Pathname[MAXPATHLEN];
+int	Nn;  /* number of nodes */
+char	*Fname;
+long	Now;
+int	Argc, Ai, Pi;
+char	**Argv;
+
+/* cpio stuff */
+int	Cpio;
+short	*Buf, *Dbuf, *Wp;
+int	Bufsize = 5120;
+int	Wct = 2560;
+
+long	Newer;
+
+struct stat Statb;
+
+char	Home[MAXPATHLEN];
+long	Blocks;
+
+int main(int argc, char *argv[]);
+struct anode *_exp(void);
+struct anode *e1(void);
+struct anode *e2(void);
+struct anode *e3(void);
+struct anode *mk(void *f, void *l, void *r);
+char *nxtarg(void);
+int and(register struct anode *p);
+int or(register struct anode *p);
+int not(register struct anode *p);
+int _glob(register struct anode *p);
+int print(void);
+int mtime(register struct anode *p);
+int atime(register struct anode *p);
+int _ctime(register struct anode *p);
+int user(register struct anode *p);
+int ino(register struct anode *p);
+int group(register struct anode *p);
+int links(register struct anode *p);
+int size(register struct anode *p);
+int perm(register struct anode *p);
+int type(register struct anode *p);
+int exeq(register struct anode *p);
+int ok(register struct anode *p);
+long mklong(short v[]);
+void cpio(void);
+int newer(void);
+int scomp(register int a, register int b, register char s);
+int doex(int com);
+int getunum(char *f, char *s);
+int descend(char *name, char *fname, struct anode *exlist);
+int gmatch(register char *s, register char *p);
+int amatch(register char *s, register char *p);
+int umatch(register char *s, register char *p);
+void bwrite(register short *rp, register int c);
+int chgreel(int x, int fl);
+void pr(char *s);
+
+int main(int argc, char *argv[])
+{
+	struct anode *exlist;
+	int paths;
+	register char *cp, *sp = 0;
+	FILE *pwd;
+
+	time(&Now);
+	getcwd(Home, MAXPATHLEN);
+	Argc = argc; Argv = argv;
+	if(argc<3) {
+usage:		pr("Usage: find path-list predicate-list\n");
+		exit(1);
+	}
+	for(Ai = paths = 1; Ai < (argc-1); ++Ai, ++paths)
+		if(*Argv[Ai] == '-' || EQ(Argv[Ai], "(") || EQ(Argv[Ai], "!"))
+			break;
+	if(paths == 1) /* no path-list */
+		goto usage;
+	if(!(exlist = _exp())) { /* parse and compile the arguments */
+		pr("find: parsing error\n");
+		exit(1);
+	}
+	if(Ai<argc) {
+		pr("find: missing conjunction\n");
+		exit(1);
+	}
+	for(Pi = 1; Pi < paths; ++Pi) {
+		sp = 0;
+		chdir(Home);
+		strcpy(Pathname, Argv[Pi]);
+		if((cp = rindex(Pathname, '/'))) {
+			sp = cp + 1;
+			*cp = '\0';
+			if(chdir(*Pathname? Pathname: "/") == -1) {
+				pr("find: bad starting directory\n");
+				exit(2);
+			}
+			*cp = '/';
+		}
+		Fname = sp? sp: Pathname;
+		descend(Pathname, Fname, exlist); /* to find files that match  */
+	}
+	if(Cpio) {
+		strcpy(Pathname, "TRAILER!!!");
+		Statb.st_size = 0;
+		cpio();
+	}
+	exit(0);
+}
+
+/* compile time functions:  priority is  _exp()<e1()<e2()<e3()  */
+
+struct anode *_exp(void) { /* parse ALTERNATION (-o)  */
+	register struct anode * p1;
+
+	p1 = e1() /* get left operand */ ;
+	if(EQ(nxtarg(), "-o")) {
+		Randlast--;
+		return(mk(or, p1, _exp()));
+	}
+	else if(Ai <= Argc) --Ai;
+	return(p1);
+}
+struct anode *e1(void) { /* parse CONCATENATION (formerly -a) */
+	register struct anode * p1;
+	register char *a;
+
+	p1 = e2();
+	a = nxtarg();
+	if(EQ(a, "-a")) {
+And:
+		Randlast--;
+		return(mk(and, p1, e1()));
+	} else if(EQ(a, "(") || EQ(a, "!") || (*a=='-' && !EQ(a, "-o"))) {
+		--Ai;
+		goto And;
+	} else if(Ai <= Argc) --Ai;
+	return(p1);
+}
+struct anode *e2(void) { /* parse NOT (!) */
+	if(Randlast) {
+		pr("find: operand follows operand\n");
+		exit(1);
+	}
+	Randlast++;
+	if(EQ(nxtarg(), "!"))
+		return(mk(not, e3(), 0));
+	else if(Ai <= Argc) --Ai;
+	return(e3());
+}
+struct anode *e3(void) { /* parse parens and predicates */
+	struct anode *p1;
+	int i, s;
+	register char *a, *b;
+
+	a = nxtarg();
+	if(EQ(a, "(")) {
+		Randlast--;
+		p1 = _exp();
+		a = nxtarg();
+		if(!EQ(a, ")")) goto err;
+		return(p1);
+	}
+	else if(EQ(a, "-print")) {
+		return(mk(print, 0, 0));
+	}
+	b = nxtarg();
+	s = *b;
+	if(s=='+') b++;
+	if(EQ(a, "-name"))
+		return(mk(_glob, b, 0));
+	else if(EQ(a, "-mtime"))
+		return(mk(mtime, (void*)atoi(b), (void*)s));
+	else if(EQ(a, "-atime"))
+		return(mk(atime, (void*)atoi(b), (void*)s));
+	else if(EQ(a, "-ctime"))
+		return(mk(_ctime, (void*)atoi(b), (void*)s));
+	else if(EQ(a, "-user")) {
+		if((i=getunum("/etc/passwd", b)) == -1) {
+			if(gmatch(b, "[0-9][0-9][0-9]*")
+			|| gmatch(b, "[0-9][0-9]")
+			|| gmatch(b, "[0-9]"))
+				return mk(user, (void*)atoi(b), (void*)s);
+			pr("find: cannot find -user name\n");
+			exit(1);
+		}
+		return(mk(user, (void*)i, (void*)s));
+	}
+	else if(EQ(a, "-inum"))
+		return(mk(ino, (void*)atoi(b), (void*)s));
+	else if(EQ(a, "-group")) {
+		if((i=getunum("/etc/group", b)) == -1) {
+			if(gmatch(b, "[0-9][0-9][0-9]*")
+			|| gmatch(b, "[0-9][0-9]")
+			|| gmatch(b, "[0-9]"))
+				return mk(group, (void*)atoi(b), (void*)s);
+			pr("find: cannot find -group name\n");
+			exit(1);
+		}
+		return(mk(group, (void*)i, (void*)s));
+	} else if(EQ(a, "-size"))
+		return(mk(size, (void*)atoi(b), (void*)s));
+	else if(EQ(a, "-links"))
+		return(mk(links, (void*)atoi(b), (void*)s));
+	else if(EQ(a, "-perm")) {
+		for(i=0; *b ; ++b) {
+			if(*b=='-') continue;
+			i <<= 3;
+			i = i + (*b - '0');
+		}
+		return(mk(perm, (void*)i, (void*)s));
+	}
+	else if(EQ(a, "-type")) {
+		i = s=='d' ? S_IFDIR :
+		    s=='b' ? S_IFBLK :
+		    s=='c' ? S_IFCHR :
+		    s=='f' ? 0100000 :
+		    0;
+		return(mk(type, (void*)i, 0));
+	}
+	else if (EQ(a, "-exec")) {
+		i = Ai - 1;
+		while(!EQ(nxtarg(), ";"));
+		return(mk(exeq, (void*)i, 0));
+	}
+	else if (EQ(a, "-ok")) {
+		i = Ai - 1;
+		while(!EQ(nxtarg(), ";"));
+		return(mk(ok, (void*)i, 0));
+	}
+	else if(EQ(a, "-cpio")) {
+		if((Cpio = creat(b, 0666)) < 0) {
+			pr("find: cannot create "), pr(b), pr("\n");
+			exit(1);
+		}
+		Buf = (short *)malloc(512);
+		Wp = Dbuf = (short *)malloc(5120);
+		return(mk(cpio, 0, 0));
+	}
+	else if(EQ(a, "-newer")) {
+		if(stat(b, &Statb) < 0) {
+			pr("find: cannot access "), pr(b), pr("\n");
+			exit(1);
+		}
+		Newer = Statb.st_mtime;
+		return mk(newer, 0, 0);
+	}
+err:	pr("find: bad option "), pr(a), pr("\n");
+	exit(1);
+}
+
+struct anode *mk(void *f, void *l, void *r)
+{
+	Node[Nn].F = f;
+	Node[Nn].L = l;
+	Node[Nn].R = r;
+	return(&(Node[Nn++]));
+}
+
+char *nxtarg(void) { /* get next arg from command line */
+	static int strikes = 0;
+
+	if(strikes==3) {
+		pr("find: incomplete statement\n");
+		exit(1);
+	}
+	if(Ai>=Argc) {
+		strikes++;
+		Ai = Argc + 1;
+		return("");
+	}
+	return(Argv[Ai++]);
+}
+
+/* execution time functions */
+int and(register struct anode *p)
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(((*L->F)(p->L)) && ((*R->F)(R))?1:0);
+}
+
+int or(register struct anode *p)
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(((*L->F)(L)) || ((*R->F)(R))?1:0);
+}
+
+int not(register struct anode *p)
+{
+	struct anode *L = p->L;
+	return( !((*L->F)(L)));
+}
+
+int _glob(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	return(gmatch(Fname, (char*)L));
+}
+
+int print(void)
+{
+	puts(Pathname);
+	return(1);
+}
+
+int mtime(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(scomp((int)((Now - Statb.st_mtime) / A_DAY), (int)L, (char)R));
+}
+
+int atime(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(scomp((int)((Now - Statb.st_atime) / A_DAY), (int)L, (char)R));
+}
+
+int _ctime(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(scomp((int)((Now - Statb.st_ctime) / A_DAY), (int)L, (char)R));
+}
+
+int user(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(scomp(Statb.st_uid, (int)L, (char)R));
+}
+
+int ino(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(scomp((int)Statb.st_ino, (int)L, (char)R));
+}
+
+int group(register struct anode *p)
+{
+	struct anode *L = p->L;
+	return((int)L == Statb.st_gid);
+}
+
+int links(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(scomp(Statb.st_nlink, (int)L, (char)R));
+}
+
+int size(register struct anode *p)
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	return(scomp((int)((Statb.st_size+511)>>9), (int)L, (char)R));
+}
+
+int perm(register struct anode *p) 
+{
+	struct anode *L = p->L;
+	struct anode *R = p->R;
+	register int i;
+	i = ((char)R=='-') ? (int)L : 07777; /* '-' means only arg bits */
+	return((Statb.st_mode & i & 07777) == (int)L);
+}
+
+int type(register struct anode *p)
+{
+	struct anode *L = p->L;
+	return((Statb.st_mode&S_IFMT)==(int)L);
+}
+
+int exeq(register struct anode *p)
+{
+	struct anode *L = p->L;
+	fflush(stdout); /* to flush possible `-print' */
+	return(doex((int)L));
+}
+
+int ok(register struct anode *p)
+{
+	struct anode *L = p->L;
+	int c;  int yes;
+	yes = 0;
+	fflush(stdout); /* to flush possible `-print' */
+	pr("< "), pr(Argv[(int)L]), pr(" ... "), pr(Pathname), pr(" >?   ");
+	fflush(stderr);
+	if((c=getchar())=='y') yes = 1;
+	while(c!='\n')
+		if(c==EOF)
+			exit(2);
+		else
+			c = getchar();
+	if(yes) return(doex((int)L));
+	return(0);
+}
+
+#define MKSHORT(v, lv) {U.l=1L;if(U.c[0]) U.l=lv, v[0]=U.s[1], v[1]=U.s[0]; else U.l=lv, v[0]=U.s[0], v[1]=U.s[1];}
+union { long l; short s[2]; char c[4]; } U;
+
+long mklong(short v[])
+{
+	U.l = 1;
+	if(U.c[0] /* VAX */)
+		U.s[0] = v[1], U.s[1] = v[0];
+	else
+		U.s[0] = v[0], U.s[1] = v[1];
+	return U.l;
+}
+
+void cpio(void)
+{
+#define MAGIC 070707
+	struct header {
+		short	h_magic,
+			h_dev,
+			h_ino,
+			h_mode,
+			h_uid,
+			h_gid,
+			h_nlink,
+			h_rdev;
+		short	h_mtime[2];
+		short	h_namesize;
+		short	h_filesize[2];
+		char	h_name[256];
+	} hdr;
+	register int ifile, ct;
+	static long fsz;
+	register int i;
+
+	hdr.h_magic = MAGIC;
+	strcpy(hdr.h_name, !strncmp(Pathname, "./", 2)? Pathname+2: Pathname);
+	hdr.h_namesize = strlen(hdr.h_name) + 1;
+	hdr.h_uid = Statb.st_uid;
+	hdr.h_gid = Statb.st_gid;
+	hdr.h_dev = Statb.st_dev;
+	hdr.h_ino = Statb.st_ino;
+	hdr.h_mode = Statb.st_mode;
+	MKSHORT(hdr.h_mtime, Statb.st_mtime);
+	hdr.h_nlink = Statb.st_nlink;
+	fsz = hdr.h_mode & S_IFREG? Statb.st_size: 0L;
+	MKSHORT(hdr.h_filesize, fsz);
+	hdr.h_rdev = Statb.st_rdev;
+	if(EQ(hdr.h_name, "TRAILER!!!")) {
+		bwrite((short *)&hdr, (sizeof hdr-256)+hdr.h_namesize);
+		for(i = 0; i < 10; ++i)
+			bwrite(Buf, 512);
+		return;
+	}
+	if(!mklong(hdr.h_filesize)) {
+		bwrite((short *)&hdr, (sizeof hdr-256)+hdr.h_namesize);
+		return;
+	}
+	if((ifile = open(Fname, 0)) < 0) {
+cerror:
+		pr("find: cannot copy "), pr(hdr.h_name), pr("\n");
+		return;
+	}
+	bwrite((short *)&hdr, (sizeof hdr-256)+hdr.h_namesize);
+	for(fsz = mklong(hdr.h_filesize); fsz > 0; fsz -= 512) {
+		ct = fsz>512? 512: fsz;
+		if(read(ifile, (char *)Buf, ct) < 0)
+			goto cerror;
+		bwrite(Buf, ct);
+	}
+	close(ifile);
+	return;
+}
+
+int newer(void)
+{
+	return Statb.st_mtime > Newer;
+}
+
+/* support functions */
+int scomp(register int a, register int b, register char s) /* funny signed compare */
+{
+	if(s == '+')
+		return(a > b);
+	if(s == '-')
+		return(a < (b * -1));
+	return(a == b);
+}
+
+
+/* Child entry point for GNO fork2() */
+void child(char **nargv) {
+	chdir(Home);
+	execvp(nargv[0], nargv);
+}
+
+int doex(int com)
+{
+	static char *nargv[50];
+	register int np;
+	register char *na;
+	union wait ccode;
+
+	np = 0;
+	while ((na=Argv[com++])) {
+		if(strcmp(na, ";")==0) break;
+		if(strcmp(na, "{}")==0) nargv[np++] = Pathname;
+		else nargv[np++] = na;
+	}
+	nargv[np] = 0;
+	if (np==0) return(9);
+
+	if(fork2(child, 1024, 0, "find", 2, nargv)) wait(&ccode);
+	return(*((int*)&ccode) ? 0:1);
+}
+
+int getunum(char *f, char *s) { /* find user/group name and return number */
+	register int i;
+	register char *sp;
+	register int c;
+	char str[20];
+	FILE *pin;
+
+	i = -1;
+	pin = fopen(f, "r");
+	c = '\n'; /* prime with a CR */
+	do {
+		if(c=='\n') {
+			sp = str;
+			while((c = *sp++ = getc(pin)) != ':')
+				if(c == EOF) goto RET;
+			*--sp = '\0';
+			if(EQ(str, s)) {
+				while((c=getc(pin)) != ':')
+					if(c == EOF) goto RET;
+				sp = str;
+				while((*sp = getc(pin)) != ':') sp++;
+				*sp = '\0';
+				i = atoi(str);
+				goto RET;
+			}
+		}
+	} while((c = getc(pin)) != EOF);
+ RET:
+	fclose(pin);
+	return(i);
+}
+
+/*
+ * name - Full pathname of current file or directory ("/foo/bar/baz")
+ * fname - Name of leaf node file or directory ("baz")
+ * exlist - Expression list
+ * Returns 0 if we are done with subtree, 1 if we should continue
+ */
+int descend(char *name, char *fname, struct anode *exlist) {
+	DIR *dp;
+	struct dirent *entry;
+	int rv = 0, i;
+	char *c1, *c2, *endofname;
+
+	if (lstat(fname, &Statb) < 0) {
+		printf("find: bad status-- %s\n", name);
+		return 0;
+	}
+
+	(*exlist->F)(exlist);
+
+	/* If it's a symlink we are done */
+	if ((Statb.st_mode & S_IFMT) == S_IFLNK) {
+		return 1;
+	}
+
+	/* If it's not a directory we are done */
+	if ((Statb.st_mode & S_IFMT) != S_IFDIR) return 1;
+
+	/* Find first '/' in name */
+	for (c1 = name; *c1; ++c1);
+	if (*(c1-1) == '/') --c1;
+	endofname = c1;
+
+	/* If we can't enter & open directory we are done */
+	if (chdir(fname) == -1) return 0;
+	dp = opendir(".");
+	if (!dp) {
+		printf("find: cannot open %s\n", name);
+		rv = 0;
+		goto done;
+	}
+
+	errno = 0;
+
+	for (;;) {
+		entry = readdir(dp);
+		if (!entry) {
+			//if (errno != 0) {
+			//	printf("find: cannot read %s (%d)\n", name, errno);
+			//}
+			rv = 0;
+			goto done;
+		}
+
+		/* Skip . and .. */
+		if (strcmp(entry->d_name, ".") == 0) continue;
+		if (strcmp(entry->d_name, "..") == 0) continue;
+
+		c1 = endofname;
+		*c1++ = '/';
+		c2 = entry->d_name;
+
+		for (i=0; i<FNAMELEN; ++i)
+			if (*c2) *c1++ = *c2++;
+			else break;
+
+		*c1 = '\0';
+
+		if (c1 == endofname) {
+			rv = 0;
+			goto done;
+		}
+
+		Fname = endofname + 1;
+
+		if (!descend(name, Fname, exlist)) {
+			*endofname = '\0';
+			chdir(Home);
+			if (chdir(Pathname) == -1) {
+				puts("find: bad directory tree\n");
+				exit(1);
+			}
+		}
+	}
+	rv = 1;
+done:
+	if (dp) closedir(dp);
+	if (chdir("..") == -1) {
+		*endofname = '\0';
+		printf("find: bad directory %s\n", name);
+		rv = 1;
+	}
+	return rv;
+}
+
+int gmatch(register char *s, register char *p) /* string match as in glob */
+{
+	if (*s=='.' && *p!='.') return(0);
+	return amatch(s, p);
+}
+
+int amatch(register char *s, register char *p) /* string match as in glob */
+{
+	register int cc;
+	int scc, k;
+	int c, lc;
+
+	scc = *s;
+	lc = 077777;
+	switch (c = *p) {
+
+	case '[':
+		k = 0;
+		while ((cc = *++p)) {
+			switch (cc) {
+
+			case ']':
+				if (k)
+					return(amatch(++s, ++p));
+				else
+					return(0);
+
+			case '-':
+				k |= (lc <= scc) & (scc <= (cc=p[1]));
+			}
+			if (scc==(lc=cc)) k++;
+		}
+		return(0);
+
+	case '?':
+	caseq:
+		if(scc) return(amatch(++s, ++p));
+		return(0);
+	case '*':
+		return(umatch(s, ++p));
+	case 0:
+		return(!scc);
+	}
+	if (c==scc) goto caseq;
+	return(0);
+}
+
+int umatch(register char *s, register char *p)
+{
+	if(*p==0) return(1);
+	while(*s)
+		if (amatch(s++, p)) return(1);
+	return(0);
+}
+
+void bwrite(register short *rp, register int c)
+{
+	register short *wp = Wp;
+
+	c = (c+1) >> 1;
+	while(c--) {
+		if(!Wct) {
+again:
+			if(write(Cpio, (char *)Dbuf, Bufsize)<0) {
+				Cpio = chgreel(1, Cpio);
+				goto again;
+			}
+			Wct = Bufsize >> 1;
+			wp = Dbuf;
+			++Blocks;
+		}
+		*wp++ = *rp++;
+		--Wct;
+	}
+	Wp = wp;
+}
+
+int chgreel(int x, int fl)
+{
+	register int f;
+	char str[22];
+	FILE *devtty;
+	struct stat statb;
+
+	pr("find: can't "), pr(x? "write output": "read input"), pr("\n");
+	fstat(fl, &statb);
+	if((statb.st_mode&S_IFMT) != S_IFCHR)
+		exit(1);
+again:
+	pr("If you want to go on, type device/file name when ready\n");
+	devtty = fopen("/dev/tty", "r");
+	fgets(str, 20, devtty);
+	str[strlen(str) - 1] = '\0';
+	if(!*str)
+		exit(1);
+	close(fl);
+	if((f = open(str, x? 1: 0)) < 0) {
+		pr("That didn't work");
+		fclose(devtty);
+		goto again;
+	}
+	return f;
+}
+void pr(char *s)
+{
+	fputs(s, stderr);
+}

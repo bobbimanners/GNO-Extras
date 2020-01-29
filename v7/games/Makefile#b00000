@@ -1,0 +1,29 @@
+all: arithmetic fish fortune hangman quiz wump
+
+arithmetic: arithmetic.c
+	occ -I /usr/include -o arithmetic arithmetic.c
+
+fish: fish.c
+	occ -I /usr/include -o fish fish.c
+
+fortune: fortune.c
+	occ -I /usr/include -o fortune fortune.c
+
+hangman: hangman.c
+	occ -I /usr/include -o hangman hangman.c
+
+quiz: quiz.c
+	occ -I /usr/include -o quiz quiz.c
+
+wump: wump.c
+	occ -I /usr/include -o wump wump.c
+
+clean:
+	cp -p rm -f *.o *.a *.root arithmetic fish fortune hangman quiz wump
+
+install: all
+	cp lib/fortunes /usr/local/games/lib
+	cp quiz.k/* /usr/local/games/quiz.k
+	cp words /usr/local/dict
+	cp arithmetic fish fortune hangman quiz wump /usr/local/games
+

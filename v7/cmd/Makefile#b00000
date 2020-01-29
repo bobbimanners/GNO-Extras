@@ -1,0 +1,31 @@
+all: cal dd file find od rev units
+
+cal: cal.c
+	occ -I /usr/include -o cal cal.c
+
+dd: dd.c
+	occ -I /usr/include -o dd dd.c
+
+file: file.c
+	occ -I /usr/include -o file file.c
+
+find: find.c
+	occ -I /usr/include -o find find.c
+
+od: od.c
+	occ -I /usr/include -o od od.c
+
+rev: rev.c
+	occ -I /usr/include -o rev rev.c
+
+units: units.c
+	occ -I /usr/include -o units units.c
+
+clean:
+	cp -p rm -f *.a *.o *.root cal dd file find od rev units
+
+install: all
+	cp units.database /usr/local/lib
+	cp cal dd file find od rev units /usr/local/bin
+	cp *.1 /usr/local/man/man1
+
