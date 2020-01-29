@@ -29,3 +29,31 @@ These install into `/usr/local/games`.
 - `hangman` - Hangman.
 - `quiz` - Quiz with various categories.
 - `wump` - Hunt the Wumpus.
+
+*Licence*
+
+Caldera issued a free licence in 2002 covering the 'ancient UNIX' code including version 7.
+This licence allows use, modification and distribution of the code.
+
+Any original work here is licenced under the MIT Licence.
+
+*Build Instructions*
+
+Under GNO, issue the following commands:
+
+```
+cd v7/cmd
+dmake
+dmake install
+cd ../games
+dmake
+dmake install
+```
+
+*Disclaimer / To Do*
+
+`backgammon` and `quiz` do not work yet.
+
+Very minimal testing has been performed.  If you find bugs, please let me know!
+
+I plan to port more version 7 utilities in due course.
