@@ -52,7 +52,7 @@ dmake install
 
 *Disclaimer / To Do*
 
-`backgammon` and `quiz` do not work yet.
+`backgammon` does not work yet.
 
 Very minimal testing has been performed.  If you find bugs, please let me know!
 

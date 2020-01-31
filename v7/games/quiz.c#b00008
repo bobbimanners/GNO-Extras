@@ -20,7 +20,7 @@ FILE *input;
 int nl = 0;
 int na = NA;
 int inc;
-int ptr  = 0;
+int ptr = 0;
 int nc = 0;
 char line[150];
 char response[100];
@@ -32,24 +32,24 @@ int disj(int s);
 int eat(int s, char c);
 int string(int s);
 int fold(int c);
-int publish(char *t);
-int pub1(int s);
+void publish(char *t);
+void pub1(int s);
 int _segment(char *u, char *w[]);
 int perm(char *u[], int m, char *v[], int n, int p[]);
 int find(char *u[], int m);
-int readindex(void);
-int talloc(void);
-int badinfo(void);
+void readindex(void);
+void talloc(void);
+void badinfo(void);
 int next(void);
 void done(int, int);
-int instruct(char *info);
-int dunno(void);
+void instruct(char *info);
+void dunno(void);
 int query(char *r);
 
 int readline(void)
 {
 	char *t;
-	register c;
+	register int c;
 loop:
 	for (t=line; c=getc(input), *t=c, c!=EOF; t++) {
 		nc++;
@@ -103,7 +103,7 @@ int disj(int s)
 		case 0:
 		case ']':
 		case '}':
-			return(t|x&s);
+			return(t|(x&s));
 		case '|':
 			ev++;
 			t |= s;
@@ -194,13 +194,13 @@ int fold(int c)
 	return(c|040);
 }
 
-int publish(char *t)
+void publish(char *t)
 {
 	ev = t;
 	pub1(1);
 }
 
-int pub1(int s)
+void pub1(int s)
 {
 	for(;;ev++){
 		switch(*ev) {
@@ -287,7 +287,7 @@ int find(char *u[], int m)
 	return(0);
 }
 
-int readindex(void)
+void readindex(void)
 {
 	xx[0] = nc = 0;
 	while(readline()) {
@@ -300,7 +300,7 @@ int readindex(void)
 	}
 }
 
-int talloc(void)
+void talloc(void)
 {
 	int i;
 	for(i=0;i<NF;i++)
@@ -309,7 +309,7 @@ int talloc(void)
 
 int main(int argc, char *argv[])
 {
-	register j;
+	register int j;
 	int i;
 	int x;
 	int z;
@@ -318,7 +318,7 @@ int main(int argc, char *argv[])
 	int count;
 	info = "/usr/local/games/quiz.k/index";
 	time(&tm);
-	inc = (int)tm&077774|01;
+	inc = (int)((tm&077774)|01);
 loop:
 	if(argc>1&&*argv[1]=='-') {
 		switch(argv[1][1]) {
@@ -393,15 +393,17 @@ loop:
 	}
 }
 
+#define STDIN 1 /* For GNO */
+
 int query(char *r)
 {
 	char *t;
 	for(t=r;;t++) {
-		if(read(0,t,1)==0)
+		if(read(STDIN,t,1)==0)
 			done(0,0);
 		if(*t==' '&&(t==r||t[-1]==' '))
 			t--;
-		if(*t=='\n') {
+		if(*t=='\n' || *t=='\r') {
 			while(t>r&&t[-1]==' ')
 				*--t = '\n';
 			break;
@@ -434,7 +436,7 @@ void done(int x, int y)
 	printf("score %d%%\n",100*rights/(rights+wrongs));
 	exit(0);
 }
-int instruct(char *info)
+void instruct(char *info)
 {
 	int i, n;
 	printf("Subjects:\n\n");
@@ -471,11 +473,11 @@ int instruct(char *info)
 	exit(0);
 }
 
-int badinfo(void){
+void badinfo(void){
 	printf("Bad info %s\n",line);
 }
 
-int dunno(void)
+void dunno(void)
 {
 	printf("I don't know about that\n");
 	exit(0);
