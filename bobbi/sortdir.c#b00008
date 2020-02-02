@@ -1,0 +1,432 @@
+/*
+ * Bobbi January 2020
+ */
+
+//#pragma debug -1
+#pragma lint -1
+
+#include <stdio.h>
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <orca.h>
+#include <gsos.h>
+#include <prodos.h>
+
+#define DEBUG
+
+typedef unsigned char uchar;
+typedef unsigned int uint;
+
+#define NMLEN 15	/* Length of filename */
+#define MAXFILES 1000	/* Max files per directory */
+
+/*
+ * ProDOS file entry
+ * See ProDOS-8 Tech Ref pp. 155
+ */
+struct pd_dirent {
+	uchar	typ_len;
+	char	name[NMLEN];
+	uchar 	type;
+	uchar	keyptr[2];
+	uchar	blksused[2];
+	uchar	eof[3];
+	uchar	ctime[4];
+	uchar	vers;
+	uchar	minvers;
+	uchar	access;
+	uchar	auxtype[2];
+	uchar	mtime[4];
+	uchar	headerptr[2];
+};
+
+#define BLKSZ 512	/* 512 byte blocks */
+#define PTRSZ 4		/* 4 bytes of pointers at beginning of each blk */
+
+/*
+ * Linked list of directory blocks read from disk
+ * Original directory block is stored in data[]
+ * Directory block for sorted directory is stored in sorteddata[]
+ */
+struct block {
+	char data[BLKSZ];         /* Original contents of block */
+	char sorteddata[BLKSZ];   /* Content block for sorted dir */
+	uint blocknum;            /* Block number on disk */
+	struct block *next;
+};
+
+struct block *blocks = NULL;
+
+/*
+ * Entry for array of filenames used by qsort()
+ */
+struct fileent {
+	char name[NMLEN+1]; /* Name converted to upper/lower case */
+	uchar blockidx;     /* Index of dir block (1,2,3 ...)  */
+	uchar entrynum;	    /* Entry within the block */
+};
+
+struct fileent filelist[MAXFILES];
+uint numfiles = 0;
+
+uchar entsz;              /* Bytes per file entry */
+uchar entperblk;          /* Number of entries per block */
+
+int readdiskblock(uchar device, uint blocknum, char *buf);
+int writediskblock(uchar device, uint blocknum, char *buf);
+void fixcase(char *in, char *out, uchar minvers, uchar vers);
+int readdir(uchar device, uint blocknum);
+int compare(const void *a, const void *b);
+void sortlist(void);
+void printlist(void);
+void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent);
+void sortblocks(void);
+int writedir(uchar device);
+void freeblocks(void);
+
+/*
+ * Read block from disk using ProDOS call
+ * buf must point to buffer with at least 512 bytes
+ */
+int readdiskblock(uchar device, uint blocknum, char *buf) {
+#ifdef DEBUG
+	printf("Reading dev %u block %u\n", device, blocknum);
+#endif
+	BlockRec br;
+	br.blockDevNum = device;
+	br.blockDataBuffer = buf;
+	br.blockNum = blocknum;
+	READ_BLOCK(&br);
+	int rc = toolerror();
+	if (rc) {
+		fprintf(stderr, "READ_BLOCK failed, err=%x\n", rc);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Write block from disk using ProDOS call
+ * buf must point to buffer with at least 512 bytes
+ */
+int writediskblock(uchar device, uint blocknum, char *buf) {
+#ifdef DEBUG
+	printf("Writing dev %u block %u\n", device, blocknum);
+#endif
+	DIORecGS dr;
+	dr.pCount = 6;
+	dr.devNum = device;
+	dr.buffer = buf;
+	dr.requestCount = BLKSZ;
+	dr.startingBlock = blocknum;
+	dr.blockSize = BLKSZ;
+	DWriteGS(&dr);
+	if (dr.transferCount != BLKSZ)
+		return -1;
+	return 0;
+}
+
+/*
+ * Uses the vers and minvers fields of the directory entry
+ * as a bitmap representing which characters are upper and which are
+ * lowercase
+ */
+void fixcase(char *in, char *out, uchar minvers, uchar vers) {
+	uchar idx = 0;
+	if (!(vers&0x80)) {
+		for (idx=0; idx<NMLEN; ++idx)
+			out[idx] = in[idx];
+		return;
+	}
+	vers <<= 1;
+	for (int i=0; i<7; ++i) {
+		out[idx++] = ((vers&0x80) ? tolower(in[idx]) : in[idx]);
+		vers <<= 1;
+	}
+	for (int i=0; i<8; ++i) {
+		out[idx++] = ((minvers&0x80) ? tolower(in[idx]) : in[idx]);
+		minvers <<= 1;
+	}
+}
+
+/*
+ * Read the first block of a directory and deduce the device ID and block
+ * number of the first block of the directory.
+ */
+uchar firstblk(char *dirname, uchar *device, uint *block) {
+	char buf[BLKSZ];
+	int fp;
+	uchar rv = 0;
+
+	fp = open(dirname, O_RDONLY);
+	if (!fp) {
+		fprintf(stderr, "Error opening dir %s\n", dirname);
+		rv = 1;
+		goto ret;
+	}
+
+	ssize_t len = read(fp, buf, BLKSZ);
+	if (len != BLKSZ) {
+		fprintf(stderr, "Error reading first block of dir %s", dirname);
+		rv = 1;
+		goto ret;
+	}
+
+	struct stat st;
+	if (stat(dirname, &st) == -1) {
+		fprintf(stderr, "Can't stat %s\n", dirname);
+		exit(1);
+	}
+
+	if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "%s is not a directory\n", dirname);
+		exit(1);
+	}
+
+	*device = st.st_dev;
+
+	/* Detect & handle volume directory */
+	if ((buf[0x04] & 0xf0) == 0xf0) {
+		*block = 2;
+		goto ret;
+	}
+
+	/* Handle subdirectory */
+	uint parentblk    = buf[0x27] + 256U * buf[0x28];
+	uint parententry  = buf[0x29];
+	uint parententlen = buf[0x2a];
+
+	/* Read parent directory block */
+	if (readdiskblock(*device, parentblk, buf) == -1) {
+		fprintf(stderr, "Can't read parent directory for %s", dirname);
+		rv = 1;
+		goto ret;
+	}
+
+	struct pd_dirent *ent =
+	  (struct pd_dirent *)(buf + PTRSZ + (parententry-1) * parententlen);
+
+	*block = ent->keyptr[0] + 256U * ent->keyptr[1];
+
+ret:
+	if (fp)
+		close(fp);
+	return rv;
+}
+
+/*
+ * Read a directory, store the raw directory blocks in a linked list
+ * and build filelist[] in preparation for sorting. 
+ * device is the device number containing the directory
+ * blocknum is the block number of the first block of the directory
+ */
+int readdir(uchar device, uint blocknum) {
+	uchar blkcnt = 1;
+
+	blocks = (struct block*)malloc(BLKSZ);
+	if (!blocks) {
+		fprintf(stderr, "Unable to allocate memory\n");
+		return 1;
+	}
+	struct block *curblk = blocks;
+	curblk->next = NULL;
+	curblk->blocknum = blocknum;
+
+	if (readdiskblock(device, blocknum, curblk->data) == -1) {
+		fprintf(stderr, "Error reading dir block %d\n", blkcnt);
+		return 1;
+	}
+
+	entsz           = curblk->data[0x23];
+	entperblk       = curblk->data[0x24];
+	uint filecount  = curblk->data[0x25] + 256U * curblk->data[0x26];
+
+	blocknum        = curblk->data[0x02] + 256U * curblk->data[0x03];
+
+	/* Copy pointers and header to sorteddata[], zero the rest */
+	bzero(curblk->sorteddata, BLKSZ);
+	memcpy(curblk->sorteddata, curblk->data, PTRSZ + entsz);
+
+
+#ifdef DEBUG
+	printf("entsz=%d\n", entsz);
+	printf("entperblk=%d\n", entperblk);
+	printf("filecount=%d\n", filecount);
+#endif
+
+	uint idx = entsz + PTRSZ; /* Skip header */
+	uchar blkentries = 2;
+	uchar entries = 0;
+
+	char numbuf[NMLEN];
+
+	while (entries < filecount) {
+		struct pd_dirent *ent = (struct pd_dirent*)(curblk->data + idx);
+		if (ent->typ_len != 0) {
+			fixcase(ent->name, numbuf, ent->vers, ent->minvers);
+			for (uchar i=0; i<NMLEN+1; ++i)
+				filelist[numfiles].name[i] = '\0';
+			for (uchar i=0; i<(ent->typ_len & 0x0f); ++i)
+				filelist[numfiles].name[i] = numbuf[i];
+			filelist[numfiles].blockidx = blkcnt;
+			filelist[numfiles].entrynum = blkentries;
+			++numfiles;
+			if (numfiles == MAXFILES) {
+				fprintf(stderr, "Too many files\n");
+				return 1;
+			}
+			++entries;
+		}
+		if (entries < filecount) {
+			if (blkentries == entperblk) {
+				curblk->next = (struct block*)malloc(BLKSZ);
+				if (!curblk->next) {
+					fprintf(stderr,
+					        "Unable to allocate memory\n");
+					return 1;
+				}
+				curblk = curblk->next;
+				curblk->next = NULL;
+				curblk->blocknum = blocknum;
+				++blkcnt;
+				if (readdiskblock(device,
+				                  blocknum,
+				                  curblk->data) == -1) {
+					fprintf(stderr,
+					        "Error reading dir block %d\n",
+					         blkcnt);
+					return 1;
+				}
+				blocknum = curblk->data[0x02] +
+				           256U * curblk->data[0x03];
+				/* Copy ptrs to sorteddata[], zero the rest */
+				bzero(curblk->sorteddata, BLKSZ);
+				memcpy(curblk->sorteddata, curblk->data, PTRSZ);
+				blkentries = 1;
+				idx = PTRSZ;
+			} else {
+				++blkentries;
+				idx += entsz;
+			}
+		}
+	}
+}
+
+/*
+ * Compare two filenames
+ */
+int compare(const void *a, const void *b) {
+	return(
+	  strncmp(((struct fileent*)a)->name, ((struct fileent*)b)->name, 15));
+}
+
+/*
+ * Sort filelist[]
+ */
+void sortlist(void) {
+	qsort(filelist, numfiles, sizeof(struct fileent), compare);
+}
+
+/*
+ * Print the file info stored in filelist[]
+ */
+void printlist(void) {
+	for(uint i=0; i<numfiles; ++i)
+		printf("blk=%d ent=%d: %s\n",
+		       filelist[i].blockidx,
+		       filelist[i].entrynum,
+		       filelist[i].name);
+}
+
+/*
+ * Copy a file entry from one srcblk, srcent to dstblk, dstent
+ * All indices are 1-based.
+ */
+void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent) {
+	printf("  from blk %d entry %d\n", srcblk, srcent);
+	printf("  to blk %d entry %d\n", dstblk, dstent);
+	struct block *source = blocks;
+	struct block *dest   = blocks;
+	while (--srcblk > 0)
+		source = source->next;
+	while (--dstblk > 0)
+		dest = dest->next;
+	memcpy(dest->sorteddata + PTRSZ + (dstent-1) * entsz,
+	       source->data + PTRSZ + (srcent-1) * entsz,
+	       entsz);
+}
+
+/*
+ * Use the sorted list in filelist[] to create a sorted set of directory
+ * blocks.  Note that the block and entry numbers are 1-based indices.
+ */
+void sortblocks(void) {
+	uchar destblk = 1;
+	uchar destentry = 2; /* Skip header on first block */
+	for(uint i=0; i<numfiles; ++i) {
+		printf("%s\n", filelist[i].name);
+		copyent(filelist[i].blockidx,
+		        filelist[i].entrynum,
+		        destblk,
+		        destentry);
+		++destentry;
+		if (destentry == entperblk) {
+			++destblk;
+			destentry = 1;
+		}
+	}
+}
+
+/*
+ * Write out the sorted directory
+ */
+int writedir(uchar device) {
+	struct block *i = blocks;
+	while (i) {
+		if(writediskblock(device, i->blocknum, i->sorteddata) == -1) {
+			fprintf(stderr, "Can't write block %u\n", i->blocknum);
+			return 1;
+		}
+		i = i->next;
+	}
+	return 0;
+}
+
+/*
+ * Walk through the linked list freeing memory
+ */
+void freeblocks(void) {
+	struct block *i = blocks, *j;
+	while (i) {
+		j = i->next;
+		free(i);
+		i = j;
+	}
+}
+
+int main(int argc, char *argv[]) {
+	if (argc != 2) {
+		fprintf(stderr, "usage: softdir path\n");
+		exit(1);
+	}
+	uchar dev;
+	uint blk;
+	if (firstblk(argv[1], &dev, &blk) != 0) {
+		exit(1);
+	}
+	printf("Sorting %s ...\n", argv[1]); /* NEED THIS FOR SOME REASON */
+	uchar err = readdir(dev, blk);
+	if (!err) {
+		printlist();
+		sortlist();
+		sortblocks();
+		err = writedir(dev);
+	}
+	freeblocks();
+	return err;
+}
+
