@@ -1,7 +1,8 @@
 /*
  * Bobbi January 2020
  *
- * TODO: Sort by type, reverse sort, combinations etc.
+ * TODO: Fix bugs!!!!
+ * TODO: Sort by type, combinations etc.
  * TODO: Improve checking code
  */
 
@@ -102,12 +103,15 @@ static uint numfiles = 0;
 static uchar entsz;              /* Bytes per file entry */
 static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
+static uchar dowrite = 0;
+static uchar doreverse = 0;
 
 static uint stack; // DEBUG
 
 //#define STACK(msg) asm {tsc; sta stack }; fputs(msg, stdout); fputs(" ", stdout); pr_int(stack); putchar('\n');
 
 /* Prototypes */
+void prerr(char *s);
 void reverse(char *s);
 void itoa(int n, char s[]);
 void uitoa(uint n, char s[]);
@@ -121,11 +125,16 @@ int  readdir(uint device, uint blocknum);
 int  compare(const void *a, const void *b);
 void sortlist(void);
 void printlist(void);
-void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent,
-             uint device, uchar write);
-void sortblocks(uint device, uchar write);
+void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device);
+void sortblocks(uint device);
 int  writedir(uchar device);
 void freeblocks(void);
+void usage(void);
+
+void prerr(char *s) {
+	fputs(s, stderr);
+	fputs("\n", stderr);
+}
 
 /* Reverse the characters of the string s */
 void reverse(char *s) {
@@ -297,7 +306,7 @@ uchar firstblk(char *dirname, uchar *device, uint *block) {
 
 #ifdef CHECK
 	if ((hdr->typ_len & 0xf0) != 0xe0) {
-		perror("Bad storage type");
+		prerr("Bad storage type");
 		rv = 1;
 		goto ret;
 	}
@@ -338,7 +347,7 @@ int readdir(uint device, uint blocknum) {
 
 	blocks = (struct block*)malloc(BLKSZ);
 	if (!blocks) {
-		perror("Unable to allocate memory");
+		prerr("Unable to allocate memory");
 		return 1;
 	}
 	struct block *curblk = blocks;
@@ -377,11 +386,11 @@ int readdir(uint device, uint blocknum) {
 
 #ifdef CHECK
 	if (entsz != 0x27) {
-		perror("Error - bad entry size");
+		prerr("Error - bad entry size");
 		return 1;
 	}
 	if (entperblk != 0x0d) {
-		perror("Error - bad entries/block");
+		prerr("Error - bad entries/block");
 		return 1;
 	}
 #endif
@@ -423,27 +432,27 @@ int readdir(uint device, uint blocknum) {
 				  hdr->parptr[0] + 256U * hdr->parptr[1];
 
 				if (parblk != blocknum) {
-					perror("Bad parent block number");
+					prerr("Bad parent block number");
 					return 1;
 				}
 				if (parentry != blkentries) {
-					perror("Bad parent block entry num");
+					prerr("Bad parent block entry num");
 					return 1;
 				}
 				if (parentlen != 0x27) {
-					perror("Bad parent entry length");
+					prerr("Bad parent entry length");
 					return 1;
 				}
 				char *dirname = buf + 0x05;
 				if (strncmp(dirname, ent->name, NMLEN)) {
-					perror("Subdirectory name mismatch");
+					prerr("Subdirectory name mismatch");
 					return 1;
 				}
 			}
 #endif
 			++numfiles;
 			if (numfiles == MAXFILES) {
-				perror("Too many files");
+				prerr("Too many files");
 				return 1;
 			}
 			++entries;
@@ -454,7 +463,7 @@ int readdir(uint device, uint blocknum) {
 				  curblk->data[0x02] + 256U*curblk->data[0x03];
 				curblk->next = (struct block*)malloc(BLKSZ);
 				if (!curblk->next) {
-					perror("Unable to allocate memory");
+					prerr("Unable to allocate memory");
 					return 1;
 				}
 				curblk = curblk->next;
@@ -487,8 +496,10 @@ int readdir(uint device, uint blocknum) {
  * Compare two filenames
  */
 int compare(const void *a, const void *b) {
-	return(
-	  strncmp(((struct fileent*)a)->name, ((struct fileent*)b)->name, 15));
+	int rc;
+	rc = strncmp(((struct fileent*)a)->name,
+	             ((struct fileent*)b)->name, 15);
+	return (doreverse ? !rc : rc);
 }
 
 /*
@@ -520,8 +531,7 @@ void printlist(void) {
  * Copy a file entry from one srcblk, srcent to dstblk, dstent
  * All indices are 1-based.
  */
-void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent,
-             uint device, uchar write) {
+void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 
 	fputs("  from blk ", stdout);
 	pr_uint(srcblk);
@@ -550,14 +560,14 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent,
 		struct pd_dirent *ent = (struct pd_dirent *)dstptr;
 		uint block = ent->keyptr[0] + 256U * ent->keyptr[1];
 		if (readdiskblock(device, block, buf) == -1) {
-			perror("Can't read subdirectory");
+			prerr("Can't read subdirectory");
 			exit(1);
 		}
 		struct pd_dirhdr *hdr = (struct pd_dirhdr*)(buf + PTRSZ);
 		hdr->parentry = dstent;
-		if (write) {
+		if (dowrite) {
 			if (writediskblock(device, block, buf) == -1) {
-				perror("Can't write subdirectory");
+				prerr("Can't write subdirectory");
 				exit(1);
 			}
 		} else {
@@ -570,13 +580,13 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent,
  * Use the sorted list in filelist[] to create a sorted set of directory
  * blocks.  Note that the block and entry numbers are 1-based indices.
  */
-void sortblocks(uint device, uchar write) {
+void sortblocks(uint device) {
 	uchar destblk = 1;
 	uchar destentry = 2; /* Skip header on first block */
 	for(uint i=0; i<numfiles; ++i) {
 		puts(filelist[i].name);
 		copyent(filelist[i].blockidx, filelist[i].entrynum,
-		        destblk, destentry, device, write);
+		        destblk, destentry, device);
 		++destentry;
 		if (destentry == entperblk) {
 			++destblk;
@@ -612,26 +622,45 @@ void freeblocks(void) {
 	}
 }
 
+void usage(void) {
+	prerr("usage: sortdir [-w] [-r] path\n");
+	prerr("  Flags: -w   Enable writing to disk");
+	prerr("         -r   Reverse sort order\n");
+	exit(2);
+}
+
 int main(int argc, char *argv[]) {
 	if (argc < 2) {
-		perror("usage: softdir [-w] path\n");
+		usage();
 		exit(1);
 	}
-	uchar dowrite = 0;
-	if (argc > 2) {
-		if (!strcmp(argv[1], "-w")) 
+	int opt;
+	while ((opt = getopt(argc, argv, "rw")) != -1) {
+		switch (opt) {
+		case 'r':
+			doreverse = 1;
+			break;
+		case 'w':
 			dowrite = 1;
+			break;
+		default:
+			usage();
+		}
 	}
+
+	if (optind >= argc)
+		usage();
+	
 	uchar dev;
 	uint blk;
-	if (firstblk(argv[argc-1], &dev, &blk) != 0) {
+	if (firstblk(argv[optind], &dev, &blk) != 0) {
 		exit(1);
 	}
 	uchar err = readdir(dev, blk);
 	if (!err) {
 		printlist();
 		sortlist();
-		sortblocks(dev, dowrite);
+		sortblocks(dev);
 		if (dowrite)
 			err = writedir(dev);
 		else
