@@ -345,7 +345,7 @@ int readdir(uint device, uint blocknum) {
 	uchar blkcnt = 1;
 	uint hdrblknum = blocknum;
 
-	blocks = (struct block*)malloc(BLKSZ);
+	blocks = (struct block*)malloc(sizeof(struct block));
 	if (!blocks) {
 		prerr("Unable to allocate memory");
 		return 1;
@@ -461,7 +461,8 @@ int readdir(uint device, uint blocknum) {
 			if (blkentries == entperblk) {
 				blocknum =
 				  curblk->data[0x02] + 256U*curblk->data[0x03];
-				curblk->next = (struct block*)malloc(BLKSZ);
+				curblk->next =
+				  (struct block*)malloc(sizeof(struct block));
 				if (!curblk->next) {
 					prerr("Unable to allocate memory");
 					return 1;
@@ -552,14 +553,13 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 		source = source->next;
 	while (--dstblk > 0)
 		dest = dest->next;
+	char *srcptr =  source->data + PTRSZ + (srcent-1) * entsz;
 	char *dstptr =  dest->sorteddata + PTRSZ + (dstent-1) * entsz;
-	memcpy(dstptr,
-	       source->data + PTRSZ + (srcent-1) * entsz,
-	       entsz);
+	memcpy(dstptr, srcptr, entsz);
 
 	/* For directories, update the parent dir entry number */
-	if ((*dstptr & 0xf0) == 0xd0) {
-		struct pd_dirent *ent = (struct pd_dirent *)dstptr;
+	struct pd_dirent *ent = (struct pd_dirent*)dstptr;
+	if ((ent->typ_len & 0xf0) == 0xd0) {
 		uint block = ent->keyptr[0] + 256U * ent->keyptr[1];
 		if (readdiskblock(device, block, buf) == -1) {
 			prerr("Can't read subdirectory");
@@ -631,6 +631,18 @@ void usage(void) {
 	prerr("           -v   Verbose output\n");
 	exit(2);
 }
+
+#if 0
+void debuglinkedlist(void) {
+	puts("============================================");
+	struct block *b = blocks;
+	while (b) {
+		pr_uint((uint)b);
+		puts("----");
+		b = b->next;
+	}
+}
+#endif
 
 int main(int argc, char *argv[]) {
 	if (argc < 2) {
