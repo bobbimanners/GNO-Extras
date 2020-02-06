@@ -499,7 +499,7 @@ int compare(const void *a, const void *b) {
 	int rc;
 	rc = strncmp(((struct fileent*)a)->name,
 	             ((struct fileent*)b)->name, 15);
-	return (doreverse ? !rc : rc);
+	return (doreverse ? -rc : rc);
 }
 
 /*
