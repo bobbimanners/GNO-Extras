@@ -549,6 +549,10 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 		}
 		struct pd_dirhdr *hdr = (struct pd_dirhdr*)buf;
 		hdr->parentry = dstent;
+		if (writediskblock(device, block, buf) == -1) {
+			perror("Can't write subdirectory");
+			exit(1);
+		}
 	}
 }
 
