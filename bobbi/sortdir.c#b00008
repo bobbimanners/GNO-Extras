@@ -70,7 +70,6 @@ struct pd_dirent {
 	uchar	hdrptr[2];
 };
 
-
 #define BLKSZ 512	/* 512 byte blocks */
 #define PTRSZ 4		/* 4 bytes of pointers at beginning of each blk */
 
@@ -86,8 +85,6 @@ struct block {
 	struct block *next;
 };
 
-struct block *blocks = NULL;
-
 /*
  * Entry for array of filenames used by qsort()
  */
@@ -98,6 +95,7 @@ struct fileent {
 };
 
 /* Globals */
+static struct block *blocks = NULL;
 static struct fileent filelist[MAXFILES];
 static uint numfiles = 0;
 static uchar entsz;              /* Bytes per file entry */
@@ -105,6 +103,7 @@ static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
 static uchar dowrite = 0;
 static uchar doreverse = 0;
+static uchar doverbose = 0;
 
 static uint stack; // DEBUG
 
@@ -131,6 +130,7 @@ int  writedir(uchar device);
 void freeblocks(void);
 void usage(void);
 
+/* Print error string to stderr */
 void prerr(char *s) {
 	fputs(s, stderr);
 	fputs("\n", stderr);
@@ -533,16 +533,18 @@ void printlist(void) {
  */
 void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 
-	fputs("  from blk ", stdout);
-	pr_uint(srcblk);
-	fputs(" entry ", stdout);
-	pr_uint(srcent);
-	putchar('\n');
-	fputs("  to blk ", stdout);
-	pr_uint(dstblk);
-	fputs(" entry ", stdout);
-	pr_uint(dstent);
-	putchar('\n');
+	if (doverbose) {
+		fputs("  from blk ", stdout);
+		pr_uint(srcblk);
+		fputs(" entry ", stdout);
+		pr_uint(srcent);
+		putchar('\n');
+		fputs("  to blk ", stdout);
+		pr_uint(dstblk);
+		fputs(" entry ", stdout);
+		pr_uint(dstent);
+		putchar('\n');
+	}
 
 	struct block *source = blocks;
 	struct block *dest   = blocks;
@@ -571,7 +573,8 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 				exit(1);
 			}
 		} else {
-			puts("Not writing updated subdir to disk");
+			if (doverbose)
+				puts("Not writing updated subdir to disk");
 		}
 	}
 }
@@ -587,8 +590,7 @@ void sortblocks(uint device) {
 		puts(filelist[i].name);
 		copyent(filelist[i].blockidx, filelist[i].entrynum,
 		        destblk, destentry, device);
-		++destentry;
-		if (destentry == entperblk) {
+		if (destentry++ == entperblk) {
 			++destblk;
 			destentry = 1;
 		}
@@ -623,9 +625,10 @@ void freeblocks(void) {
 }
 
 void usage(void) {
-	prerr("usage: sortdir [-w] [-r] path\n");
-	prerr("  Flags: -w   Enable writing to disk");
-	prerr("         -r   Reverse sort order\n");
+	prerr("usage: sortdir [-rwv] path\n");
+	prerr("  Options: -r   Reverse sort order");
+	prerr("           -w   Enable writing to disk");
+	prerr("           -v   Verbose output\n");
 	exit(2);
 }
 
@@ -635,13 +638,16 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "rw")) != -1) {
+	while ((opt = getopt(argc, argv, "rwv")) != -1) {
 		switch (opt) {
 		case 'r':
 			doreverse = 1;
 			break;
 		case 'w':
 			dowrite = 1;
+			break;
+		case 'v':
+			doverbose = 1;
 			break;
 		default:
 			usage();
@@ -658,13 +664,15 @@ int main(int argc, char *argv[]) {
 	}
 	uchar err = readdir(dev, blk);
 	if (!err) {
-		printlist();
+		if (doverbose)
+			printlist();
 		sortlist();
 		sortblocks(dev);
 		if (dowrite)
 			err = writedir(dev);
 		else
-			puts("Not writing to disk");
+			if (doverbose)
+				puts("Not writing to disk");
 	}
 	freeblocks();
 	return err;
