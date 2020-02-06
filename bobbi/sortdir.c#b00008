@@ -114,18 +114,20 @@ void uitoa(uint n, char s[]);
 void pr_int(int a);
 void pr_uint(uint a);
 void print_uint(uint i);
-int readdiskblock(uchar device, uint blocknum, char *buf);
-int writediskblock(uchar device, uint blocknum, char *buf);
+int  readdiskblock(uchar device, uint blocknum, char *buf);
+int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers);
-int readdir(uint device, uint blocknum);
-int compare(const void *a, const void *b);
+int  readdir(uint device, uint blocknum);
+int  compare(const void *a, const void *b);
 void sortlist(void);
 void printlist(void);
-void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device);
-void sortblocks(uint device);
-int writedir(uchar device);
+void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent,
+             uint device, uchar write);
+void sortblocks(uint device, uchar write);
+int  writedir(uchar device);
 void freeblocks(void);
 
+/* Reverse the characters of the string s */
 void reverse(char *s) {
 	char buf[10];
 	int l = strlen(s);
@@ -151,6 +153,7 @@ void itoa(int n, char s[]) {
 	reverse(s);
 }
 
+/* Unsigned verson of itoa() */
 void uitoa(uint n, char s[]) {
 	int i;
 
@@ -162,12 +165,14 @@ void uitoa(uint n, char s[]) {
 	reverse(s);
 }
 
+/* Print an integer */
 void pr_int(int a) {
 	char buf[10];
 	itoa(a, buf);
 	fputs(buf, stdout);
 }
 
+/* Print an unsigned integer */
 void pr_uint(unsigned int a) {
 	char buf[10];
 	uitoa(a, buf);
@@ -515,7 +520,8 @@ void printlist(void) {
  * Copy a file entry from one srcblk, srcent to dstblk, dstent
  * All indices are 1-based.
  */
-void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
+void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent,
+             uint device, uchar write) {
 
 	fputs("  from blk ", stdout);
 	pr_uint(srcblk);
@@ -547,11 +553,15 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 			perror("Can't read subdirectory");
 			exit(1);
 		}
-		struct pd_dirhdr *hdr = (struct pd_dirhdr*)buf;
+		struct pd_dirhdr *hdr = (struct pd_dirhdr*)(buf + PTRSZ);
 		hdr->parentry = dstent;
-		if (writediskblock(device, block, buf) == -1) {
-			perror("Can't write subdirectory");
-			exit(1);
+		if (write) {
+			if (writediskblock(device, block, buf) == -1) {
+				perror("Can't write subdirectory");
+				exit(1);
+			}
+		} else {
+			puts("Not writing updated subdir to disk");
 		}
 	}
 }
@@ -560,16 +570,13 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
  * Use the sorted list in filelist[] to create a sorted set of directory
  * blocks.  Note that the block and entry numbers are 1-based indices.
  */
-void sortblocks(uint device) {
+void sortblocks(uint device, uchar write) {
 	uchar destblk = 1;
 	uchar destentry = 2; /* Skip header on first block */
 	for(uint i=0; i<numfiles; ++i) {
 		puts(filelist[i].name);
-		copyent(filelist[i].blockidx,
-		        filelist[i].entrynum,
-		        destblk,
-		        destentry,
-		        device);
+		copyent(filelist[i].blockidx, filelist[i].entrynum,
+		        destblk, destentry, device, write);
 		++destentry;
 		if (destentry == entperblk) {
 			++destblk;
@@ -624,11 +631,11 @@ int main(int argc, char *argv[]) {
 	if (!err) {
 		printlist();
 		sortlist();
-		sortblocks(dev);
+		sortblocks(dev, dowrite);
 		if (dowrite)
 			err = writedir(dev);
 		else
-			puts("Not writing to disk\n");
+			puts("Not writing to disk");
 	}
 	freeblocks();
 	return err;
