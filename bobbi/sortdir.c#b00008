@@ -1,9 +1,8 @@
 /*
  * Bobbi January 2020
  *
- * TODO: Fix bugs!!!!
- * TODO: Sort by type, combinations etc.
- * TODO: Improve checking code
+ * TODO: Improve filesystem checking code
+ * TODO: Improve output
  */
 
 #pragma debug 25	/* Enable stack checking */
@@ -21,7 +20,7 @@
 #include <prodos.h>
 
 
-#define DEBUG           /* Enable additional debug printout */
+#undef DEBUG            /* Enable additional debug printout */
 #define CHECK		/* Perform additional integrity checking */
 
 typedef unsigned char uchar;
@@ -89,7 +88,9 @@ struct block {
  * Entry for array of filenames used by qsort()
  */
 struct fileent {
-	char name[NMLEN+1]; /* Name converted to upper/lower case */
+	char  name[NMLEN+1];/* Name converted to upper/lower case */
+	uchar type;         /* ProDOS file type */
+	uint  order;        /* Hack to make qsort() stable */
 	uchar blockidx;     /* Index of dir block (1,2,3 ...)  */
 	uchar entrynum;	    /* Entry within the block */
 };
@@ -102,8 +103,8 @@ static uchar entsz;              /* Bytes per file entry */
 static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
 static uchar dowrite = 0;
-static uchar doreverse = 0;
 static uchar doverbose = 0;
+static char sortopts[5] = "n";
 
 static uint stack; // DEBUG
 
@@ -121,8 +122,13 @@ int  readdiskblock(uchar device, uint blocknum, char *buf);
 int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers);
 int  readdir(uint device, uint blocknum);
-int  compare(const void *a, const void *b);
-void sortlist(void);
+int  cmp_name_asc(const void *a, const void *b);
+int  cmp_name_desc(const void *a, const void *b);
+int  cmp_type_asc(const void *a, const void *b);
+int  cmp_type_desc(const void *a, const void *b);
+int  cmp_dir_beg(const void *a, const void *b);
+int  cmp_dir_end(const void *a, const void *b);
+void sortlist(char s);
 void printlist(void);
 void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device);
 void sortblocks(uint device);
@@ -408,6 +414,7 @@ int readdir(uint device, uint blocknum) {
 				filelist[numfiles].name[i] = '\0';
 			for (uchar i=0; i<(ent->typ_len & 0x0f); ++i)
 				filelist[numfiles].name[i] = namebuf[i];
+			filelist[numfiles].type = ent->type;
 			filelist[numfiles].blockidx = blkcnt;
 			filelist[numfiles].entrynum = blkentries;
 #ifdef CHECK
@@ -494,26 +501,114 @@ int readdir(uint device, uint blocknum) {
 }
 
 /*
- * Compare two filenames
+ * Compare - filename sort in ascending order
  */
-int compare(const void *a, const void *b) {
-	int rc;
-	rc = strncmp(((struct fileent*)a)->name,
-	             ((struct fileent*)b)->name, 15);
-	return (doreverse ? -rc : rc);
+int cmp_name_asc(const void *a, const void *b) {
+	return strncmp(((struct fileent*)a)->name,
+	             ((struct fileent*)b)->name, NMLEN);
+}
+
+/*
+ * Compare - filename sort in descending order
+ */
+int cmp_name_desc(const void *a, const void *b) {
+	return strncmp(((struct fileent*)b)->name,
+	               ((struct fileent*)a)->name, NMLEN);
+}
+
+/*
+ * Compare - type sort in ascending order
+ * Uses the order field to make qsort() stable
+ */
+int cmp_type_asc(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	int rc = aa->type - bb->type;
+	return rc != 0 ? rc : aa->order - bb->order;
+}
+/*
+ * Compare - type sort in descending order
+ * Uses the order field to make qsort() stable
+ */
+int cmp_type_desc(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	int rc = bb->type - aa->type;
+	return rc != 0 ? rc : aa->order - bb->order;
+}
+
+/*
+ * Compare - sort with directories at the beginning
+ * Uses the order field to make qsort() stable
+ */
+int cmp_dir_beg(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	if ((aa->type == 0x0f) && (bb->type != 0x0f))
+		return -1;
+	if ((bb->type == 0x0f) && (aa->type != 0x0f))
+		return 1;
+	return aa->order - bb->order;
+}
+
+/*
+ * Compare - sort with directories at the end
+ * Uses the order field to make qsort() stable
+ */
+int cmp_dir_end(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	if ((aa->type == 0x0f) && (bb->type != 0x0f))
+		return 1;
+	if ((bb->type == 0x0f) && (aa->type != 0x0f))
+		return -1;
+	return aa->order - bb->order;
 }
 
 /*
  * Sort filelist[]
+ * s defines the field to sort on
  */
-void sortlist(void) {
-	qsort(filelist, numfiles, sizeof(struct fileent), compare);
+void sortlist(char s) {
+	for(uint i=0; i<numfiles; ++i) {
+		filelist[i].order = i;
+	}
+	switch (s) {
+	case 'n':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_name_asc);
+		break;
+	case 'N':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_name_desc);
+		break;
+	case 't':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_type_asc);
+		break;
+	case 'T':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_type_desc);
+		break;
+	case 'd':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_dir_beg);
+		break;
+	case 'D':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_dir_end);
+		break;
+	default:
+		prerr("Invalid sort option");
+		exit(2);
+	}
 }
 
 /*
  * Print the file info stored in filelist[]
  */
 void printlist(void) {
+	fputs("----------------------------------------------------\n", stdout);
 	fputs("numfiles=", stdout);
 	pr_int(numfiles);
 	putchar('\n');
@@ -526,6 +621,7 @@ void printlist(void) {
 		fputs(filelist[i].name, stdout);
 		putchar('\n');
 	}
+	fputs("----------------------------------------------------\n", stdout);
 }
 
 /*
@@ -625,24 +721,27 @@ void freeblocks(void) {
 }
 
 void usage(void) {
-	prerr("usage: sortdir [-rwv] path\n");
-	prerr("  Options: -r   Reverse sort order");
-	prerr("           -w   Enable writing to disk");
-	prerr("           -v   Verbose output\n");
+	prerr("usage: sortdir [-s xxx] [-rwv] path\n");
+	prerr("  Options: -s xxx  Directory sort options");
+	prerr("           -w      Enable writing to disk");
+	prerr("           -v      Verbose output");
+	prerr("           -h      This help");
+	prerr("");
+	prerr("Directory sort options xxx, is a list of fields on which to");
+	prerr("sort. The sort options are processed left-to-right.");
+	prerr("  n  sort by filename ascending");
+	prerr("  N  sort by filename descending");
+	prerr("  t  sort by type ascending");
+	prerr("  T  sort by type descending");
+	prerr("  d  sort directories to top");
+	prerr("  D  sort directories to bottom");
+	prerr("");
+	prerr("e.g.: sortdir -w -s nd .");
+	prerr("Will sort the current directory first by name (ascending),");
+	prerr("then sort directories to the top, and will write the sorted");
+	prerr("directory to disk.");
 	exit(2);
 }
-
-#if 0
-void debuglinkedlist(void) {
-	puts("============================================");
-	struct block *b = blocks;
-	while (b) {
-		pr_uint((uint)b);
-		puts("----");
-		b = b->next;
-	}
-}
-#endif
 
 int main(int argc, char *argv[]) {
 	if (argc < 2) {
@@ -650,10 +749,10 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "rwv")) != -1) {
+	while ((opt = getopt(argc, argv, "hwvs:")) != -1) {
 		switch (opt) {
-		case 'r':
-			doreverse = 1;
+		case 's':
+			strncpy(sortopts, optarg, 5);
 			break;
 		case 'w':
 			dowrite = 1;
@@ -661,6 +760,7 @@ int main(int argc, char *argv[]) {
 		case 'v':
 			doverbose = 1;
 			break;
+		case 'h':
 		default:
 			usage();
 		}
@@ -678,8 +778,11 @@ int main(int argc, char *argv[]) {
 	if (!err) {
 		if (doverbose)
 			printlist();
-		sortlist();
+		for (uchar i=0; i<strlen(sortopts); ++i)
+			sortlist(sortopts[i]);
 		sortblocks(dev);
+		if (doverbose)
+			printlist();
 		if (dowrite)
 			err = writedir(dev);
 		else
