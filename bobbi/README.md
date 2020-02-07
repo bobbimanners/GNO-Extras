@@ -1,7 +1,9 @@
+```
 ** THIS IS ALPHA-QUALITY CODE **
 ** USE AT YOUR OWN RISK!      **
 
-usage: sortdir [-s xxx] [-rwv] path\n
+usage: sortdir [-s xxx] [-rwv] path
+
   Options: -s xxx  Directory sort options
            -w      Enable writing to disk
            -v      Verbose output
@@ -20,4 +22,5 @@ e.g.: sortdir -w -s nd .
 Will sort the current directory first by name (ascending),
 then sort directories to the top, and will write the sorted
 directory to disk.
+```
 
