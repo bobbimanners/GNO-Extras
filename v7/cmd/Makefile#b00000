@@ -25,7 +25,7 @@ clean:
 	cp -p rm -f *.a *.o *.root cal dd file find od rev units
 
 install: all
-	cp units.database /usr/local/lib
+	cp units.database /usr/local/lib/units
 	cp cal dd file find od rev units /usr/local/bin
 	cp *.1 /usr/local/man/man1
 
