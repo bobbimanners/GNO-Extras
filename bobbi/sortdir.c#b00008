@@ -1,13 +1,23 @@
 /*
  * Bobbi January 2020
  *
- * TODO: Improve filesystem checking code
- * TODO: Improve output
+ * TODO: Use segment to make more memory available
+ * TODO: Call isfree() for seedling, sapling and tree blocks
+ * TODO: Handle storage type $5 - files with resource fork
+ * TODO: Check no disk blocks are used more than once
+ * TODO: Recursive / whole volume mode - check all unused blocks are free
+ * TODO: Fix mode
+ * TODO: Tool for 'extending' volume dir to more than 4 blocks
+ * TODO: Tool for lower/upper/camel casing filenames
+ * TODO: Legacy/extended date format conversion
+ * TODO: Trimming unused directory blocks
+ * TODO: Improve output and user interface
  */
 
 #pragma debug 25	/* Enable stack checking */
 #pragma lint -1
 #pragma stacksize 16384
+#pragma memorymodel 0
 
 #include <stdio.h>
 #include <ctype.h>
@@ -97,6 +107,8 @@ struct fileent {
 };
 
 /* Globals */
+static uchar freelist[8096];     /* 1 bit for each of 64K blocks */
+static uchar flloaded = 0;
 static struct block *blocks = NULL;
 static struct fileent filelist[MAXFILES];
 static uint numfiles = 0;
@@ -123,6 +135,8 @@ void print_uint(uint i);
 int  readdiskblock(uchar device, uint blocknum, char *buf);
 int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers);
+int  readfreelist(uchar device);
+int  isfree(uint blk);
 int  saplingblocks(uchar device, uint keyblk, uint *blkcnt);
 int  treeblocks(uchar device, uint keyblk, uint *blkcnt);
 int  readdir(uint device, uint blocknum);
@@ -210,6 +224,9 @@ int readdiskblock(uchar device, uint blocknum, char *buf) {
 	pr_uint(blocknum);
 	putchar('\n');
 #endif
+	if (flloaded)
+		if (isfree(blocknum))
+			fprintf(stderr, "Block %u is marked free!\n", blocknum);
 	BlockRec br;
 	br.blockDevNum = device;
 	br.blockDataBuffer = buf;
@@ -343,6 +360,49 @@ ret:
 	if (fp)
 		close(fp);
 	return rv;
+}
+
+/*
+ * Read the free list
+ */
+int readfreelist(uchar device) {
+	bzero(freelist, 8096);
+	if (readdiskblock(device, 2, buf) == -1) {
+		puts("Error reading volume dir");
+		return -1;
+	}
+	uint flblk = (uint)buf[0x27] + 256U * (uint)buf[0x28];
+	uint totblks = (uint)buf[0x29] + 256U * (uint)buf[0x2a];
+	printf("Volume has %u blocks\n", totblks);
+	uint flsize = totblks / 4096U;
+	if ((flsize % 4096) >0)
+		++flsize;
+	char *p = (char*)freelist;
+	for (uint i=0; i<flsize; ++i) {
+		if (readdiskblock(device, flblk++, p) == -1) {
+			puts("Error reading free list");
+			return -1;
+		}
+		p += BLKSZ;
+	}
+#if 0
+	for (uint i=0; i<8096; ++i) {
+		pr_uint(freelist[i]);
+		putchar(' ');
+	}
+#endif
+	flloaded = 1;
+	return 0;
+}
+
+/*
+ * Determine if block blk is free or not
+ */
+int isfree(uint blk) {
+	uint idx = blk / 8;
+	uint bit = blk % 8;
+	//printf("freelist[%u]=%u\n",idx,freelist[idx]);
+	return (freelist[idx] >> bit) & 0x01 ? 1 : 0;
 }
 
 /*
@@ -867,6 +927,7 @@ int main(int argc, char *argv[]) {
 	if (firstblk(argv[optind], &dev, &blk) != 0) {
 		exit(1);
 	}
+	readfreelist(dev);
 	uchar err = readdir(dev, blk);
 	if (!err) {
 		if (doverbose)
