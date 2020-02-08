@@ -103,6 +103,7 @@ static uint numfiles = 0;
 static uchar entsz;              /* Bytes per file entry */
 static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
+static char buf2[BLKSZ];         /* General purpose scratch buffer */
 static uchar dowrite = 0;
 static uchar doverbose = 0;
 static char sortopts[5] = "n";
@@ -122,6 +123,8 @@ void print_uint(uint i);
 int  readdiskblock(uchar device, uint blocknum, char *buf);
 int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers);
+int  saplingblocks(uchar device, uint keyblk, uint *blkcnt);
+int  treeblocks(uchar device, uint keyblk, uint *blkcnt);
 int  readdir(uint device, uint blocknum);
 int  cmp_name_asc(const void *a, const void *b);
 int  cmp_name_desc(const void *a, const void *b);
@@ -343,13 +346,52 @@ ret:
 }
 
 /*
+ * Count the blocks in a sapling file
+ */
+int saplingblocks(uchar device, uint keyblk, uint *blkcnt) {
+	if (readdiskblock(device, keyblk, buf) == -1) {
+		fprintf(stderr, "Error reading blk %u\n", keyblk);
+		return -1;
+	}
+	*blkcnt = 1;
+	for (uint i=0; i<256; ++i) {
+		uint p = (uchar)buf[i] + 256U * (uchar)buf[i+256];
+		if (p)
+			++(*blkcnt);
+	}
+	return 0;
+}
+
+/*
+ * Count the blocks in a tree file
+ */
+int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
+	if (readdiskblock(device, keyblk, buf2) == -1) {
+		fprintf(stderr, "Error reading blk %u\n", keyblk);
+		return -1;
+	}
+	*blkcnt = 1;
+	for (uint i=0; i<256; ++i) {
+		uint p = (uchar)buf2[i] + 256U * (uchar)buf2[i+256];
+		if (p) {
+			uint b;
+			if (saplingblocks(device, p, &b) == 0)
+				*blkcnt += b;
+			else
+				return -1;
+		}
+	}
+	return 0;
+}
+
+/*
  * Read a directory, store the raw directory blocks in a linked list
  * and build filelist[] in preparation for sorting. 
  * device is the device number containing the directory
  * blocknum is the block number of the first block of the directory
  */
 int readdir(uint device, uint blocknum) {
-	uchar blkcnt = 1;
+	uint blkcnt = 1;
 	uint hdrblknum = blocknum;
 
 	blocks = (struct block*)malloc(sizeof(struct block));
@@ -389,8 +431,6 @@ int readdir(uint device, uint blocknum) {
 	putchar('\n');
 #endif
 
-// TODO: Add a check that the filecount is correct
-
 #ifdef CHECK
 	if (entsz != 0x27) {
 		prerr("Error - bad entry size");
@@ -407,7 +447,7 @@ int readdir(uint device, uint blocknum) {
 
 	static char namebuf[NMLEN];
 
-	while (entries < filecount) {
+	while (1) {
 		struct pd_dirent *ent = (struct pd_dirent*)(curblk->data + idx);
 		if (ent->typ_len != 0) {
 			fixcase(ent->name, namebuf, ent->vers, ent->minvers);
@@ -426,7 +466,10 @@ int readdir(uint device, uint blocknum) {
 				        "%s: Header ptr %u should be %u\n",
 				        namebuf, hdrblk, hdrblknum);
 			}
-			if ((ent->typ_len & 0xf0) == 0xd0) {
+			uint blks = ent->blksused[0] + 256U * ent->blksused[1];
+			switch (ent->typ_len & 0xf0) {
+			case 0xd0:
+				/* Subdirectory */
 				if (readdiskblock(device, keyblk, buf) == -1) {
 					fprintf(stderr,
 					        "Error reading blk %u\n",
@@ -456,6 +499,53 @@ int readdir(uint device, uint blocknum) {
 					prerr("Subdirectory name mismatch");
 					return 1;
 				}
+				break;
+			case 0x10:
+				/* Seedling */
+				if (blks != 1) {
+					fputs(namebuf, stdout);
+					fputs(
+					  " - seedling file: invalid size ",
+					  stdout);
+					pr_uint(blks);
+					return 1;
+				}
+				break;
+			case 0x20:
+				/* Sapling */
+				saplingblocks(device, keyblk, &blkcnt);
+				if (blks != blkcnt) {
+					fputs(namebuf, stdout);
+					fputs(" sapling file: invalid size ",
+					      stdout);
+					pr_uint(blks);
+					fputs(", counted ", stdout);
+					pr_uint(blkcnt);
+					putchar('\n');
+				}
+				break;
+			case 0x30:
+				/* Tree */
+				treeblocks(device, keyblk, &blkcnt);
+				if (blks != blkcnt) {
+					fputs(namebuf, stdout);
+					fputs(" tree file: invalid size ",
+					      stdout);
+					pr_uint(blks);
+					fputs(", counted ", stdout);
+					pr_uint(blkcnt);
+					putchar('\n');
+				}
+				break;
+			case 0x40:
+				/* Pascal area */
+				fputs(namebuf, stdout);
+				fputs(" Pascal area!!\n", stdout);
+				break;
+			default:
+				fprintf(stderr,
+				        "%s: unexpected storage type 0x%x\n",
+				        namebuf, ent->typ_len & 0xf0);
 			}
 #endif
 			++numfiles;
@@ -465,39 +555,41 @@ int readdir(uint device, uint blocknum) {
 			}
 			++entries;
 		}
-		if (entries < filecount) {
-			if (blkentries == entperblk) {
-				blocknum =
-				  curblk->data[0x02] + 256U*curblk->data[0x03];
-				curblk->next =
-				  (struct block*)malloc(sizeof(struct block));
-				if (!curblk->next) {
-					prerr("Unable to allocate memory");
-					return 1;
-				}
-				curblk = curblk->next;
-				curblk->next = NULL;
-				curblk->blocknum = blocknum;
-				++blkcnt;
-				if (readdiskblock(device,
-				                  blocknum,
-				                  curblk->data) == -1) {
-					fprintf(stderr,
-					        "Error reading dir block %d\n",
-					         blkcnt);
-					return 1;
-				}
-				/* Copy ptrs to sorteddata[], zero the rest */
-				bzero(curblk->sorteddata, BLKSZ);
-				memcpy(curblk->sorteddata, curblk->data, PTRSZ);
-				blkentries = 1;
-				idx = PTRSZ;
-			} else {
-				++blkentries;
-				idx += entsz;
+		if (blkentries == entperblk) {
+			blocknum =
+			  curblk->data[0x02] + 256U*curblk->data[0x03];
+			if (blocknum == 0) {
+				break;
 			}
+			curblk->next =
+			  (struct block*)malloc(sizeof(struct block));
+			if (!curblk->next) {
+				prerr("Unable to allocate memory");
+				return 1;
+			}
+			curblk = curblk->next;
+			curblk->next = NULL;
+			curblk->blocknum = blocknum;
+			++blkcnt;
+			if (
+			  readdiskblock(device, blocknum, curblk->data) == -1) {
+				fprintf(stderr,
+				  "Error reading dir block %d\n", blkcnt);
+				  return 1;
+			}
+			/* Copy ptrs to sorteddata[], zero the rest */
+			bzero(curblk->sorteddata, BLKSZ);
+			memcpy(curblk->sorteddata, curblk->data, PTRSZ);
+			blkentries = 1;
+			idx = PTRSZ;
+		} else {
+			++blkentries;
+			idx += entsz;
 		}
 	}
+	if (filecount != entries)
+		fprintf(stderr, "Filecount %u wrong, should be %u\n",
+		        filecount, entries);
 	return 0;
 }
 
