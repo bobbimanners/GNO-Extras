@@ -521,8 +521,11 @@ int scomp(register int a, register int b, register char s) /* funny signed compa
 
 /* Child entry point for GNO fork2() */
 void child(char **nargv) {
+	int rc;
 	chdir(Home);
-	execvp(nargv[0], nargv);
+	rc = execvp(nargv[0], nargv);
+	if (rc == -1)
+		fprintf(stderr, "find: '%s': Can't execute\n", nargv[0]);
 }
 
 int doex(int com)
