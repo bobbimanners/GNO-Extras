@@ -525,7 +525,7 @@ void child(char **nargv) {
 	chdir(Home);
 	rc = execvp(nargv[0], nargv);
 	if (rc == -1)
-		fprintf(stderr, "find: '%s': Can't execute\n", nargv[0]);
+		fprintf(stderr, "find: cannot execute '%s'\n", nargv[0]);
 }
 
 int doex(int com)
@@ -626,9 +626,9 @@ int descend(char *name, char *fname, struct anode *exlist) {
 	for (;;) {
 		entry = readdir(dp);
 		if (!entry) {
-			//if (errno != 0) {
-			//	printf("find: cannot read %s (%d)\n", name, errno);
-			//}
+			if (errno != 0) {
+				printf("find: cannot read %s (%d)\n", name, errno);
+			}
 			rv = 0;
 			goto done;
 		}
