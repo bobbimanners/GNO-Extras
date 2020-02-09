@@ -1,16 +1,16 @@
 /*
  * Bobbi January-February 2020
  *
- * TODO: Use segment to make more memory available
- * TODO: Handle storage type $5 - files with resource fork
- * TODO: Check no disk blocks are used more than once
+ * TODO: Fix bug where some file blocks reported as free
  * TODO: Recursive / whole volume mode - check all unused blocks are free
+ * TODO: Check no disk blocks are used more than once
  * TODO: Fix mode
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Tool for lower/upper/camel casing filenames
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
  * TODO: Improve output and user interface
+ * TODO: Use segment to make more memory available
  */
 
 #pragma debug 25	/* Enable stack checking */
@@ -115,9 +115,10 @@ static uchar entsz;              /* Bytes per file entry */
 static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
 static char buf2[BLKSZ];         /* General purpose scratch buffer */
+static char buf3[BLKSZ];         /* General purpose scratch buffer */
 static uchar dowrite = 0;
 static uchar doverbose = 0;
-static char sortopts[5] = "n";
+static char sortopts[5] = "";
 
 /* Prototypes */
 void prerr(char *s);
@@ -128,6 +129,7 @@ int  readfreelist(uchar device);
 int  isfree(uint blk);
 int  saplingblocks(uchar device, uint keyblk, uint *blkcnt);
 int  treeblocks(uchar device, uint keyblk, uint *blkcnt);
+int  forkblocks(uchar device, uint keyblk, uint *blkcnt);
 int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
                   uint blocknum, uint blkentries, uint *blkcnt);
 int  readdir(uint device, uint blocknum);
@@ -306,8 +308,8 @@ int readfreelist(uchar device) {
 		puts("Error reading volume dir");
 		return -1;
 	}
-	uint flblk = (uint)buf[0x27] + 256U * (uint)buf[0x28];
-	uint totblks = (uint)buf[0x29] + 256U * (uint)buf[0x2a];
+	uint flblk = buf[0x27] + 256U * buf[0x28];
+	uint totblks = buf[0x29] + 256U * buf[0x2a];
 	printf("Volume has %u blocks\n", totblks);
 	uint flsize = totblks / 4096U;
 	if ((flsize % 4096) >0)
@@ -350,7 +352,7 @@ int saplingblocks(uchar device, uint keyblk, uint *blkcnt) {
 	}
 	*blkcnt = 1;
 	for (uint i=0; i<256; ++i) {
-		uint p = (uchar)buf[i] + 256U * (uchar)buf[i+256];
+		uint p = buf[i] + 256U * buf[i+256];
 		if (p) {
 			if (isfree(p))
 				printf("  Data block %u is marked free!\n", p);
@@ -370,7 +372,7 @@ int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
 	}
 	*blkcnt = 1;
 	for (uint i=0; i<256; ++i) {
-		uint p = (uchar)buf2[i] + 256U * (uchar)buf2[i+256];
+		uint p = buf2[i] + 256U * buf2[i+256];
 		if (p) {
 			if (isfree(p))
 				printf("  Idx block %u is marked free!\n", p);
@@ -381,6 +383,85 @@ int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
 				return -1;
 		}
 	}
+	return 0;
+}
+
+/*
+ * Count the blocks in a GSOS fork file
+ * See http://1000bit.it/support/manual/apple/technotes/pdos/tn.pdos.25.html
+ */
+int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
+	if (readdiskblock(device, keyblk, buf3) == -1) {
+		printf("  Error reading blk %u\n", keyblk);
+		return -1;
+	}
+	*blkcnt = 1;
+	uint count;
+
+	/* Data fork */
+	uchar type = buf3[0x00];
+	keyblk = buf3[0x01] + 256U * buf3[0x02];
+	uint blks = buf3[0x03] + 256U * buf3[0x04];
+	if (isfree(keyblk))
+		printf("  Data fork keyblock %u is marked free!\n", keyblk);
+	switch (type) {
+	case 0x1:
+		/* Seedling */
+		count = 1;
+		break;
+	case 0x2:
+		/* Sapling */
+		saplingblocks(device, keyblk, &count);
+		break;
+	case 0x3:
+		/* Tree */
+		treeblocks(device, keyblk, &count);
+		break;
+	default:
+		puts("  Invalid storage type for data fork");
+		count = 0;
+		break;
+	}
+	if (blks != count) {
+		if (count != 0) {
+			printf("  Data fork size %u is incorrect", blks);
+			printf(", should be %u\n", count);
+		}
+	}
+	*blkcnt += count;
+
+	/* Data fork */
+	type = buf3[0x100];
+	keyblk = buf3[0x101] + 256U * buf3[0x102];
+	blks = buf3[0x103] + 256U * buf3[0x104];
+	if (isfree(keyblk))
+		printf("  Resource fork keyblock %u is marked free!\n", keyblk);
+	switch (type) {
+	case 0x1:
+		/* Seedling */
+		count = 1;
+		break;
+	case 0x2:
+		/* Sapling */
+		saplingblocks(device, keyblk, &count);
+		break;
+	case 0x3:
+		/* Tree */
+		treeblocks(device, keyblk, &count);
+		break;
+	default:
+		puts("  Invalid storage type for resource fork");
+		count = 0;
+		break;
+	}
+	if (blks != count) {
+		if (count != 0) {
+			printf("  Resource fork size %u is incorrect", blks);
+			printf(", should be %u\n", count);
+		}
+	}
+	*blkcnt += count;
+
 	return 0;
 }
 
@@ -554,7 +635,14 @@ int readdir(uint device, uint blocknum) {
 			case 0x40:
 				/* Pascal area */
 				puts(" Pascal area!!");
+				//
+				// TODO: Check name is PASCAL.AREA type 0xef
+				//
 				count = 0;
+				break;
+			case 0x50:
+				/* File with resource fork */
+				forkblocks(device, keyblk, &count);
 				break;
 			default:
 				printf("  %s: unexpected storage type 0x%x\n",
@@ -877,16 +965,18 @@ int main(int argc, char *argv[]) {
 	if (!err) {
 		if (doverbose)
 			printlist();
-		for (uchar i=0; i<strlen(sortopts); ++i)
-			sortlist(sortopts[i]);
-		sortblocks(dev);
-		if (doverbose)
-			printlist();
-		if (dowrite)
-			err = writedir(dev);
-		else
+		if (strlen(sortopts) > 0) {
+			for (uchar i=0; i<strlen(sortopts); ++i)
+				sortlist(sortopts[i]);
+			sortblocks(dev);
 			if (doverbose)
-				puts("Not writing to disk");
+				printlist();
+			if (dowrite)
+				err = writedir(dev);
+			else
+				if (doverbose)
+					puts("Not writing to disk");
+		}
 	}
 	freeblocks();
 	return err;
