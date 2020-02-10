@@ -1,0 +1,11 @@
+all: nl sortdir
+
+nl: nl.c
+	occ -w -o nl nl.c
+
+sortdir: sortdir.c
+	occ -w -o sortdir sortdir.c
+
+install: sortdir nl
+	cp nl sortdir /usr/local/bin
+
