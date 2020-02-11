@@ -339,7 +339,7 @@ int isfree(uint blk) {
 	uint idx = blk / 8;
 	uint bit = blk % 8;
 	//printf("freelist[%u]=%u\n",idx,freelist[idx]);
-	return (freelist[idx] >> bit) & 0x01 ? 1 : 0;
+	return (freelist[idx] << bit) & 0x80 ? 1 : 0;
 }
 
 /*
