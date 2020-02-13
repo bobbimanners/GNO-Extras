@@ -1,8 +1,7 @@
 /*
  * Bobbi January-February 2020
  *
- * TODO: Fix bug where some file blocks reported as free
- * TODO: Recursive / whole volume mode - check all unused blocks are free
+ * TODO: Whole volume mode - check all unused blocks are free
  * TODO: Check no disk blocks are used more than once
  * TODO: Fix mode
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
@@ -105,19 +104,30 @@ struct fileent {
 	uchar entrynum;	    /* Entry within the block */
 };
 
+/*
+ * Entry for list of directory keyblocks to check
+ */
+struct dirblk {
+	uint          blocknum;
+	struct dirblk *next;
+};
+
 /* Globals */
 static uchar freelist[8096];     /* 1 bit for each of 64K blocks */
 static uchar flloaded = 0;
 static struct block *blocks = NULL;
+static struct dirblk *dirs = NULL;
 static struct fileent filelist[MAXFILES];
-static uint numfiles = 0;
+static uint numfiles;
 static uchar entsz;              /* Bytes per file entry */
 static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
 static char buf2[BLKSZ];         /* General purpose scratch buffer */
 static char buf3[BLKSZ];         /* General purpose scratch buffer */
+static uchar dorecurse = 0;
 static uchar dowrite = 0;
 static uchar doverbose = 0;
+static uchar dodebug = 0;
 static char sortopts[5] = "";
 
 /* Prototypes */
@@ -132,6 +142,7 @@ int  treeblocks(uchar device, uint keyblk, uint *blkcnt);
 int  forkblocks(uchar device, uint keyblk, uint *blkcnt);
 int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
                   uint blocknum, uint blkentries, uint *blkcnt);
+void enqueuesubdir(uint blocknum);
 int  readdir(uint device, uint blocknum);
 int  cmp_name_asc(const void *a, const void *b);
 int  cmp_name_desc(const void *a, const void *b);
@@ -141,11 +152,14 @@ int  cmp_dir_beg(const void *a, const void *b);
 int  cmp_dir_end(const void *a, const void *b);
 void sortlist(char s);
 void printlist(void);
+uint blockidxtoblocknum(uint idx);
 void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device);
 void sortblocks(uint device);
 int  writedir(uchar device);
 void freeblocks(void);
+void freedirs(void);
 void usage(void);
+void processonedir(uint device, uint blocknum);
 
 /* Print error string to stderr */
 void prerr(char *s) {
@@ -508,6 +522,26 @@ int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
 }
 
 /*
+ * Record the keyblock of a subdirectory to be processed subsequently
+ */
+void enqueuesubdir(uint blocknum) {
+	struct dirblk *p = (struct dirblk*)malloc(sizeof(struct dirblk));
+	if (!p) {
+		puts("** Unable to allocate memory **");
+		exit(3);
+	}
+	p->blocknum = blocknum;
+	p->next = NULL;
+	static struct dirblk *end;
+	if (!dirs)
+		end = dirs = p;
+	else {
+		end->next = p;
+		end = p;
+	}
+}
+
+/*
  * Read a directory, store the raw directory blocks in a linked list
  * and build filelist[] in preparation for sorting. 
  * device is the device number containing the directory
@@ -517,10 +551,12 @@ int readdir(uint device, uint blocknum) {
 	uint blkcnt = 1;
 	uint hdrblknum = blocknum;
 
+	numfiles = 0;
+
 	blocks = (struct block*)malloc(sizeof(struct block));
 	if (!blocks) {
-		puts("Unable to allocate memory");
-		return 1;
+		puts("** Unable to allocate memory **");
+		exit(3);
 	}
 	struct block *curblk = blocks;
 	curblk->next = NULL;
@@ -617,8 +653,9 @@ int readdir(uint device, uint blocknum) {
 			switch (ent->typ_len & 0xf0) {
 			case 0xd0:
 				/* Subdirectory */
+				enqueuesubdir(keyblk);
 				subdirblocks(device, keyblk, ent,
-				          blocknum, blkentries, &count);
+				             blocknum, blkentries, &count);
 				break;
 			case 0x10:
 				/* Seedling */
@@ -672,7 +709,7 @@ int readdir(uint device, uint blocknum) {
 			  (struct block*)malloc(sizeof(struct block));
 			if (!curblk->next) {
 				puts("** Unable to allocate memory **");
-				return 1;
+				exit(3);
 			}
 			curblk = curblk->next;
 			curblk->next = NULL;
@@ -819,15 +856,37 @@ void printlist(void) {
 }
 
 /*
+ * Convert block index to block number
+ * Block index is 1-based (1,2,3 ...)
+ */
+uint blockidxtoblocknum(uint idx) {
+	struct block *p = blocks;
+	for (uint i=1; i<idx; ++i)
+		if (p)
+			p = p->next;
+		else {
+			puts("** Internal error **");
+			exit(3);
+		}
+	if (!p) {
+		puts("** Internal error **");
+		exit(3);
+	}
+	return p->blocknum;
+}
+
+/*
  * Copy a file entry from one srcblk, srcent to dstblk, dstent
  * All indices are 1-based.
  */
 void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 
-	if (doverbose) {
+	if (dodebug) {
 		printf("  from dirblk %03u entry %02u\n", srcblk, srcent);
 		printf("    to dirblk %03u entry %02u\n", dstblk, dstent);
 	}
+
+	uint parentblk = blockidxtoblocknum(dstblk);
 
 	struct block *source = blocks;
 	struct block *dest   = blocks;
@@ -848,6 +907,8 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 			exit(1);
 		}
 		struct pd_dirhdr *hdr = (struct pd_dirhdr*)(buf + PTRSZ);
+		hdr->parptr[0] = parentblk & 0xff;
+		hdr->parptr[1] = (parentblk >> 8) & 0xff;
 		hdr->parentry = dstent;
 		if (dowrite) {
 			if (writediskblock(device, block, buf) == -1) {
@@ -869,7 +930,8 @@ void sortblocks(uint device) {
 	uchar destblk = 1;
 	uchar destentry = 2; /* Skip header on first block */
 	for(uint i=0; i<numfiles; ++i) {
-		puts(filelist[i].name);
+		if (dodebug)
+			puts(filelist[i].name);
 		copyent(filelist[i].blockidx, filelist[i].entrynum,
 		        destblk, destentry, device);
 		if (destentry++ == entperblk) {
@@ -904,13 +966,26 @@ void freeblocks(void) {
 		free(i);
 		i = j;
 	}
+	blocks = NULL;
+}
+
+void freedirs(void) {
+	struct dirblk *i = dirs, *j;
+	while (i) {
+		j = i->next;
+		free(i);
+		i = j;
+	}
+	dirs = NULL;
 }
 
 void usage(void) {
 	prerr("usage: sortdir [-s xxx] [-rwv] path\n");
 	prerr("  Options: -s xxx  Directory sort options");
+	prerr("           -r      Recursive descent");
 	prerr("           -w      Enable writing to disk");
 	prerr("           -v      Verbose output");
+	prerr("           -V      Verbose debugging output");
 	prerr("           -h      This help");
 	prerr("");
 	prerr("Directory sort options xxx, is a list of fields on which to");
@@ -929,14 +1004,52 @@ void usage(void) {
 	exit(2);
 }
 
+/*
+ * Performs all actions for a single directory
+ * blocknum is the keyblock of the directory to process
+ */
+void processonedir(uint device, uint blocknum) {
+	uchar err = readdir(device, blocknum);
+	if (doverbose) {
+		printlist();
+	}
+	if (err) {
+		puts("Error scanning directory, will not sort");
+		goto done;
+	}
+	if (strlen(sortopts) > 0) {
+		for (uchar i=0; i<strlen(sortopts); ++i) {
+			if (doverbose) {
+				printf("Sorting - order '%c' ...\n",
+				       sortopts[i]);
+			}
+			sortlist(sortopts[i]);
+		}
+		sortblocks(device);
+		if (doverbose) {
+			puts("After sorting ...");
+			printlist();
+		}
+		if (dowrite)
+			err = writedir(device);
+		else if (doverbose)
+			puts("Not writing to disk without -w");
+	}
+done:
+	freeblocks();
+}
+
 int main(int argc, char *argv[]) {
 	if (argc < 2) {
 		usage();
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "hwvs:")) != -1) {
+	while ((opt = getopt(argc, argv, "rhwvVs:")) != -1) {
 		switch (opt) {
+		case 'r':
+			dorecurse = 1;
+			break;
 		case 's':
 			strncpy(sortopts, optarg, 5);
 			break;
@@ -946,13 +1059,16 @@ int main(int argc, char *argv[]) {
 		case 'v':
 			doverbose = 1;
 			break;
+		case 'V':
+			dodebug = 1;
+			break;
 		case 'h':
 		default:
 			usage();
 		}
 	}
 
-	if (optind >= argc)
+	if (optind != argc - 1)
 		usage();
 	
 	uchar dev;
@@ -961,24 +1077,15 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	readfreelist(dev);
-	uchar err = readdir(dev, blk);
-	if (!err) {
-		if (doverbose)
-			printlist();
-		if (strlen(sortopts) > 0) {
-			for (uchar i=0; i<strlen(sortopts); ++i)
-				sortlist(sortopts[i]);
-			sortblocks(dev);
-			if (doverbose)
-				printlist();
-			if (dowrite)
-				err = writedir(dev);
-			else
-				if (doverbose)
-					puts("Not writing to disk");
+	processonedir(dev, blk);
+	if (dorecurse) {
+		struct dirblk *d = dirs;
+		while (d) {
+			processonedir(dev, d->blocknum);
+			d = d->next;
 		}
 	}
-	freeblocks();
-	return err;
+	freedirs();
+	return 0;
 }
 
