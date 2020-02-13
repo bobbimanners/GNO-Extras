@@ -1,15 +1,20 @@
 /*
  * Bobbi January-February 2020
  *
+ * TODO: Error counting & fix error return codes
+ * TODO: Error log file option
  * TODO: Whole volume mode - check all unused blocks are free
  * TODO: Check no disk blocks are used more than once
  * TODO: Fix mode
- * TODO: Tool for 'extending' volume dir to more than 4 blocks
+ * TODO: Sort by mtime, ctime, size ...
  * TODO: Tool for lower/upper/camel casing filenames
+ * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
  * TODO: Improve output and user interface
  * TODO: Use segment to make more memory available
+ * TODO: Needs a manpage
+ * TODO: Maybe make a version that doesn't need GNO
  */
 
 #pragma debug 25	/* Enable stack checking */
@@ -142,7 +147,7 @@ int  treeblocks(uchar device, uint keyblk, uint *blkcnt);
 int  forkblocks(uchar device, uint keyblk, uint *blkcnt);
 int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
                   uint blocknum, uint blkentries, uint *blkcnt);
-void enqueuesubdir(uint blocknum);
+void enqueuesubdir(uint blocknum, uint subdiridx);
 int  readdir(uint device, uint blocknum);
 int  cmp_name_asc(const void *a, const void *b);
 int  cmp_name_desc(const void *a, const void *b);
@@ -157,9 +162,8 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device);
 void sortblocks(uint device);
 int  writedir(uchar device);
 void freeblocks(void);
-void freedirs(void);
 void usage(void);
-void processonedir(uint device, uint blocknum);
+void processdir(uint device, uint blocknum);
 
 /* Print error string to stderr */
 void prerr(char *s) {
@@ -324,7 +328,8 @@ int readfreelist(uchar device) {
 	}
 	uint flblk = buf[0x27] + 256U * buf[0x28];
 	uint totblks = buf[0x29] + 256U * buf[0x2a];
-	printf("Volume has %u blocks\n", totblks);
+	if (doverbose)
+		printf("Volume has %u blocks\n", totblks);
 	uint flsize = totblks / 4096U;
 	if ((flsize % 4096) >0)
 		++flsize;
@@ -523,22 +528,25 @@ int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
 
 /*
  * Record the keyblock of a subdirectory to be processed subsequently
+ * blocknum is the block number of the subdirectory keyblock
+ * subdiridx is a sequential counter of the subdirs in the current directory
  */
-void enqueuesubdir(uint blocknum) {
+void enqueuesubdir(uint blocknum, uint subdiridx) {
 	struct dirblk *p = (struct dirblk*)malloc(sizeof(struct dirblk));
 	if (!p) {
 		puts("** Unable to allocate memory **");
 		exit(3);
 	}
 	p->blocknum = blocknum;
-	p->next = NULL;
-	static struct dirblk *end;
-	if (!dirs)
-		end = dirs = p;
-	else {
-		end->next = p;
-		end = p;
+	static struct dirblk *prev;
+	if (subdiridx == 0) {     /* First subdir is inserted at head of list */
+		p->next = dirs;
+		dirs = p;
+	} else {                  /* Subsequent subdirs follow the previous */
+		p->next = prev->next;
+		prev->next = p;
 	}
+	prev = p;
 }
 
 /*
@@ -599,6 +607,7 @@ int readdir(uint device, uint blocknum) {
 	uint idx = entsz + PTRSZ; /* Skip header */
 	uchar blkentries = 2;
 	uchar entries = 0;
+	uint subdirs = 0;
 
 	while (1) {
 		struct pd_dirent *ent = (struct pd_dirent*)(curblk->data + idx);
@@ -653,7 +662,7 @@ int readdir(uint device, uint blocknum) {
 			switch (ent->typ_len & 0xf0) {
 			case 0xd0:
 				/* Subdirectory */
-				enqueuesubdir(keyblk);
+				enqueuesubdir(keyblk, subdirs++);
 				subdirblocks(device, keyblk, ent,
 				             blocknum, blkentries, &count);
 				break;
@@ -732,7 +741,7 @@ int readdir(uint device, uint blocknum) {
 	}
 	if (filecount != entries)
 		printf("Filecount %u wrong, should be %u\n", filecount, entries);
-	return 0;
+	return 0; // TODO: THIS SHOULD BE NUMBER OF ERRORS
 }
 
 /*
@@ -969,16 +978,6 @@ void freeblocks(void) {
 	blocks = NULL;
 }
 
-void freedirs(void) {
-	struct dirblk *i = dirs, *j;
-	while (i) {
-		j = i->next;
-		free(i);
-		i = j;
-	}
-	dirs = NULL;
-}
-
 void usage(void) {
 	prerr("usage: sortdir [-s xxx] [-rwv] path\n");
 	prerr("  Options: -s xxx  Directory sort options");
@@ -1008,7 +1007,7 @@ void usage(void) {
  * Performs all actions for a single directory
  * blocknum is the keyblock of the directory to process
  */
-void processonedir(uint device, uint blocknum) {
+void processdir(uint device, uint blocknum) {
 	uchar err = readdir(device, blocknum);
 	if (doverbose) {
 		printlist();
@@ -1077,15 +1076,16 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	readfreelist(dev);
-	processonedir(dev, blk);
+	processdir(dev, blk);
 	if (dorecurse) {
-		struct dirblk *d = dirs;
-		while (d) {
-			processonedir(dev, d->blocknum);
-			d = d->next;
+		while (dirs) {
+			struct dirblk *d = dirs;
+			blk = dirs->blocknum;
+			dirs = d->next;
+			free(d);
+			processdir(dev, blk);
 		}
 	}
-	freedirs();
 	return 0;
 }
 
