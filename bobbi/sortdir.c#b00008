@@ -321,7 +321,7 @@ ret:
  * Read the free list
  */
 int readfreelist(uchar device) {
-	bzero(freelist, 8096);
+	bzero(freelist, 8192);
 	if (readdiskblock(device, 2, buf) == -1) {
 		puts("Error reading volume dir");
 		return -1;
@@ -342,7 +342,7 @@ int readfreelist(uchar device) {
 		p += BLKSZ;
 	}
 #if 0
-	for (uint i=0; i<8096; ++i) {
+	for (uint i=0; i<8192; ++i) {
 		pr_uint(freelist[i]);
 		putchar(' ');
 	}
