@@ -118,7 +118,7 @@ struct dirblk {
 };
 
 /* Globals */
-static uchar freelist[8096];     /* 1 bit for each of 64K blocks */
+static uchar freelist[8192];     /* 1 bit for each of 64K blocks */
 static uchar flloaded = 0;
 static struct block *blocks = NULL;
 static struct dirblk *dirs = NULL;
