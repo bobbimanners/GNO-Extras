@@ -1,11 +1,10 @@
 /*
  * Bobbi January-February 2020
  *
- * TODO: Only do freelist checking if whole-volume mode specified
  * TODO: Error counting & fix error return codes
  * TODO: Error log file option
  * TODO: Fix mode
- * TODO: Sort by mtime, ctime, size ...
+ * TODO: Sort by mtime, ctime
  * TODO: Tool for lower/upper/camel casing filenames
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
@@ -36,7 +35,8 @@
 #define CHECK		/* Perform additional integrity checking */
 
 typedef unsigned char uchar;
-typedef unsigned int uint;
+typedef unsigned int  uint;
+typedef unsigned long ulong;
 
 #define NMLEN 15	/* Length of filename */
 #define MAXFILES 1000	/* Max files per directory */
@@ -103,6 +103,8 @@ struct block {
 struct fileent {
 	char  name[NMLEN+1];/* Name converted to upper/lower case */
 	uchar type;         /* ProDOS file type */
+	uint  blocks;       /* Size in blocks */
+	ulong eof;          /* EOF position in bytes */
 	uint  order;        /* Hack to make qsort() stable */
 	uchar blockidx;     /* Index of dir block (1,2,3 ...)  */
 	uchar entrynum;	    /* Entry within the block */
@@ -130,6 +132,7 @@ static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
 static char buf2[BLKSZ];         /* General purpose scratch buffer */
 static char buf3[BLKSZ];         /* General purpose scratch buffer */
+static uchar dowholedisk = 0;    /* -D whole-disk option */
 static uchar dorecurse = 0;      /* -r recurse option */
 static uchar dowrite = 0;        /* -w write option */
 static uchar doverbose = 0;      /* -v verbose option */
@@ -160,6 +163,10 @@ int  cmp_type_asc(const void *a, const void *b);
 int  cmp_type_desc(const void *a, const void *b);
 int  cmp_dir_beg(const void *a, const void *b);
 int  cmp_dir_end(const void *a, const void *b);
+int  cmp_blocks_asc(const void *a, const void *b);
+int  cmp_blocks_desc(const void *a, const void *b);
+int  cmp_eof_asc(const void *a, const void *b);
+int  cmp_eof_desc(const void *a, const void *b);
 void sortlist(char s);
 void printlist(void);
 uint blockidxtoblocknum(uint idx);
@@ -695,6 +702,9 @@ int readdir(uint device, uint blocknum) {
 			}
 			puts(namebuf);
 #endif
+			uint blks = ent->blksused[0] + 256U * ent->blksused[1];
+			ulong eof = ent->eof[0] + 256L * ent->eof[1] +
+			            65536L * ent->eof[2];
 			for (uchar i=0; i<NMLEN+1; ++i)
 				filelist[numfiles].name[i] = '\0';
 			for (uchar i=0; i<(ent->typ_len & 0x0f); ++i)
@@ -702,6 +712,8 @@ int readdir(uint device, uint blocknum) {
 			filelist[numfiles].type = ent->type;
 			filelist[numfiles].blockidx = blkcnt;
 			filelist[numfiles].entrynum = blkentries;
+			filelist[numfiles].blocks = blks;
+			filelist[numfiles].eof = eof;
 #ifdef CHECK
 			uint keyblk = ent->keyptr[0] + 256U * ent->keyptr[1];
 			uint hdrblk = ent->hdrptr[0] + 256U * ent->hdrptr[1];
@@ -709,7 +721,6 @@ int readdir(uint device, uint blocknum) {
 				printf("  Header ptr %u should be %u\n",
 				       hdrblk, hdrblknum);
 			}
-			uint blks = ent->blksused[0] + 256U * ent->blksused[1];
 			uint count;
 			switch (ent->typ_len & 0xf0) {
 			case 0xd0:
@@ -864,6 +875,56 @@ int cmp_dir_end(const void *a, const void *b) {
 }
 
 /*
+ * Compare - sort in increasing order of blocks used
+ */
+int  cmp_blocks_asc(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	int rc = aa->blocks - bb->blocks;
+	return rc != 0 ? rc : aa->order - bb->order;
+}
+
+/*
+ * Compare - sort in decreasing order of blocks used
+ */
+int  cmp_blocks_desc(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	int rc = bb->blocks - aa->blocks;
+	return rc != 0 ? rc : aa->order - bb->order;
+}
+
+/*
+ * Compare - sort in increasing order of EOF position
+ */
+int  cmp_eof_asc(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	long diff = aa->eof - bb->eof;
+	if (diff == 0)
+		return aa->order - bb->order;
+	if (diff > 0)
+		return 1;
+	else
+		return -1;
+}
+
+/*
+ * Compare - sort in decreasing order of EOF position
+ */
+int  cmp_eof_desc(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	long diff = bb->eof - aa->eof;
+	if (diff == 0)
+		return aa->order - bb->order;
+	if (diff > 0)
+		return 1;
+	else
+		return -1;
+}
+
+/*
  * Sort filelist[]
  * s defines the field to sort on
  */
@@ -896,6 +957,22 @@ void sortlist(char s) {
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_dir_end);
 		break;
+	case 'b':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_blocks_asc);
+		break;
+	case 'B':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_blocks_desc);
+		break;
+	case 'e':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_eof_asc);
+		break;
+	case 'E':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_eof_desc);
+		break;
 	default:
 		puts("Invalid sort option");
 		exit(2);
@@ -908,13 +985,17 @@ void sortlist(char s) {
 void printlist(void) {
 	puts("---------------------------------------------------------");
 	printf("numfiles=%u\n", numfiles);
-	puts("Dirblk Entry Type : Name");
-	for(uint i=0; i<numfiles; ++i)
-		printf("   %03u    %02u   %02x : %s\n",
+	puts("Dirblk Entry Type : Name            : Blocks      EOF");
+	for (uint i=0; i<numfiles; ++i) {
+		printf("   %03u    %02u   %02x : %s",
 		       filelist[i].blockidx,
 		       filelist[i].entrynum,
 		       filelist[i].type,
 		       filelist[i].name);
+		for (uint j=0; j<(16-strlen(filelist[i].name)); ++j)
+			putchar(' ');
+		printf(": %5u  %8lu\n", filelist[i].blocks, filelist[i].eof);
+	}
 	puts("---------------------------------------------------------");
 }
 
@@ -1036,6 +1117,7 @@ void usage(void) {
 	prerr("usage: sortdir [-s xxx] [-rwv] path\n");
 	prerr("  Options: -s xxx  Directory sort options");
 	prerr("           -r      Recursive descent");
+	prerr("           -D      Whole-disk mode (implies -r)");
 	prerr("           -w      Enable writing to disk");
 	prerr("           -v      Verbose output");
 	prerr("           -V      Verbose debugging output");
@@ -1049,6 +1131,10 @@ void usage(void) {
 	prerr("  T  sort by type descending");
 	prerr("  d  sort directories to top");
 	prerr("  D  sort directories to bottom");
+	prerr("  b  sort by blocks used ascending");
+	prerr("  B  sort by blocks used descending");
+	prerr("  e  sort by EOF position ascending");
+	prerr("  E  sort by EOF position descending");
 	prerr("");
 	prerr("e.g.: sortdir -w -s nd .");
 	prerr("Will sort the current directory first by name (ascending),");
@@ -1099,6 +1185,11 @@ done:
  */
 void checkfreeandused(void) {
 	printf("Total blocks on volume %u\n", totblks);
+	uint freeblks = 0;
+	for (uint i=0; i<totblks; ++i)
+		if (isfree(i))
+			++freeblks;
+	printf("Free blocks on volume %u\n", freeblks);
 	for (uint i=0; i<totblks; ++i) {
 		uint idx = i / 8;
 		if (!(freelist[idx] ^ usedlist[i]))	/* Speed-up */
@@ -1119,8 +1210,12 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "rhwvVs:")) != -1) {
+	while ((opt = getopt(argc, argv, "DrhwvVs:")) != -1) {
 		switch (opt) {
+		case 'D':
+			dowholedisk = 1;
+			dorecurse = 1;
+			break;
 		case 'r':
 			dorecurse = 1;
 			break;
@@ -1151,7 +1246,10 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	readfreelist(dev);
-	processdir(dev, blk);
+	if (dowholedisk)
+		processdir(dev, 2);
+	else
+		processdir(dev, blk);
 	if (dorecurse) {
 		while (dirs) {
 			struct dirblk *d = dirs;
@@ -1161,7 +1259,8 @@ int main(int argc, char *argv[]) {
 			processdir(dev, blk);
 		}
 	}
-	checkfreeandused();
+	if (dowholedisk)
+		checkfreeandused();
 	free(freelist);
 	free(usedlist);
 	return 0;
