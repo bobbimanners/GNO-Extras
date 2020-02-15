@@ -1,10 +1,9 @@
 /*
  * Bobbi January-February 2020
  *
+ * TODO: Only do freelist checking if whole-volume mode specified
  * TODO: Error counting & fix error return codes
  * TODO: Error log file option
- * TODO: Whole volume mode - check all unused blocks are free
- * TODO: Check no disk blocks are used more than once
  * TODO: Fix mode
  * TODO: Sort by mtime, ctime, size ...
  * TODO: Tool for lower/upper/camel casing filenames
@@ -12,7 +11,6 @@
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
  * TODO: Improve output and user interface
- * TODO: Use segment to make more memory available
  * TODO: Needs a manpage
  * TODO: Maybe make a version that doesn't need GNO
  */
@@ -85,6 +83,7 @@ struct pd_dirent {
 
 #define BLKSZ 512	/* 512 byte blocks */
 #define PTRSZ 4		/* 4 bytes of pointers at beginning of each blk */
+#define FLSZ 8192	/* Bytes required for 64K block free-list */
 
 /*
  * Linked list of directory blocks read from disk
@@ -118,8 +117,10 @@ struct dirblk {
 };
 
 /* Globals */
-static uchar freelist[8096];     /* 1 bit for each of 64K blocks */
-static uchar flloaded = 0;
+static uint totblks;             /* Total # blocks on volume */
+static uchar *freelist;          /* Free-list bitmap */
+static uchar *usedlist;          /* Bit map of used blocks */
+static uchar flloaded = 0;       /* 1 if free-list has been loaded */
 static struct block *blocks = NULL;
 static struct dirblk *dirs = NULL;
 static struct fileent filelist[MAXFILES];
@@ -129,11 +130,11 @@ static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
 static char buf2[BLKSZ];         /* General purpose scratch buffer */
 static char buf3[BLKSZ];         /* General purpose scratch buffer */
-static uchar dorecurse = 0;
-static uchar dowrite = 0;
-static uchar doverbose = 0;
-static uchar dodebug = 0;
-static char sortopts[5] = "";
+static uchar dorecurse = 0;      /* -r recurse option */
+static uchar dowrite = 0;        /* -w write option */
+static uchar doverbose = 0;      /* -v verbose option */
+static uchar dodebug = 0;        /* -V very verbose option */
+static char sortopts[5] = "";    /* -s:abc list of sort options */
 
 /* Prototypes */
 void prerr(char *s);
@@ -142,6 +143,10 @@ int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers, uchar len);
 int  readfreelist(uchar device);
 int  isfree(uint blk);
+int  isused(uint blk);
+void markused(uint blk);
+void checkblock(uint blk, char *msg);
+int  seedlingblocks(uchar device, uint keyblk, uint *blkcnt);
 int  saplingblocks(uchar device, uint keyblk, uint *blkcnt);
 int  treeblocks(uchar device, uint keyblk, uint *blkcnt);
 int  forkblocks(uchar device, uint keyblk, uint *blkcnt);
@@ -164,6 +169,7 @@ int  writedir(uchar device);
 void freeblocks(void);
 void usage(void);
 void processdir(uint device, uint blocknum);
+void checkfreeandused(void);
 
 /* Print error string to stderr */
 void prerr(char *s) {
@@ -321,13 +327,26 @@ ret:
  * Read the free list
  */
 int readfreelist(uchar device) {
-	bzero(freelist, 8096);
+	freelist = (uchar*)malloc(FLSZ);
+	if (!freelist) {
+		puts("** Unable to allocate memory **");
+		exit(3);
+	}
+	bzero(freelist, FLSZ);
+	usedlist = (uchar*)malloc(FLSZ);
+	if (!usedlist) {
+		puts("** Unable to allocate memory **");
+		exit(3);
+	}
+	bzero(usedlist, FLSZ);
+	markused(0); /* Boot block */
+	markused(1); /* SOS boot block */
 	if (readdiskblock(device, 2, buf) == -1) {
 		puts("Error reading volume dir");
 		return -1;
 	}
 	uint flblk = buf[0x27] + 256U * buf[0x28];
-	uint totblks = buf[0x29] + 256U * buf[0x2a];
+	totblks = buf[0x29] + 256U * buf[0x2a];
 	if (doverbose)
 		printf("Volume has %u blocks\n", totblks);
 	uint flsize = totblks / 4096U;
@@ -335,18 +354,13 @@ int readfreelist(uchar device) {
 		++flsize;
 	char *p = (char*)freelist;
 	for (uint i=0; i<flsize; ++i) {
+		markused(flblk);
 		if (readdiskblock(device, flblk++, p) == -1) {
 			puts("Error reading free list");
 			return -1;
 		}
 		p += BLKSZ;
 	}
-#if 0
-	for (uint i=0; i<8096; ++i) {
-		pr_uint(freelist[i]);
-		putchar(' ');
-	}
-#endif
 	flloaded = 1;
 	return 0;
 }
@@ -357,14 +371,55 @@ int readfreelist(uchar device) {
 int isfree(uint blk) {
 	uint idx = blk / 8;
 	uint bit = blk % 8;
-	//printf("freelist[%u]=%u\n",idx,freelist[idx]);
 	return (freelist[idx] << bit) & 0x80 ? 1 : 0;
+}
+
+/*
+ * Determine if block blk is used or not
+ */
+int isused(uint blk) {
+	uint idx = blk / 8;
+	uint bit = blk % 8;
+	return (usedlist[idx] << bit) & 0x80 ? 1 : 0;
+}
+
+/*
+ * Mark a block as used
+ */
+void markused(uint blk) {
+	//printf("markused(%u)\n", blk);
+	uint idx = blk / 8;
+	uint bit = blk % 8;
+	usedlist[idx] |= (0x80 >> bit);
+}
+
+/*
+ * Perform all the operations to check a block which is used by
+ * a directory or file.  Complains if the block is on the free-list
+ * and also if we have encountered this block in a previous file or dir.
+ */
+void checkblock(uint blk, char *msg) {
+	if (isfree(blk))
+		printf("  %s block %u is marked free!\n", msg, blk);
+	if (isused(blk))
+		printf("  %s block %u is already used!\n", msg, blk);
+	markused(blk);
+}
+
+/*
+ * Count the blocks in a seedling file
+ */
+int seedlingblocks(uchar device, uint keyblk, uint *blkcnt) {
+	checkblock(keyblk, "Data");
+	*blkcnt = 1;
+	return 0;
 }
 
 /*
  * Count the blocks in a sapling file
  */
 int saplingblocks(uchar device, uint keyblk, uint *blkcnt) {
+	checkblock(keyblk, "Data");
 	if (readdiskblock(device, keyblk, buf) == -1) {
 		printf("  Error reading blk %u\n", keyblk);
 		return -1;
@@ -373,8 +428,7 @@ int saplingblocks(uchar device, uint keyblk, uint *blkcnt) {
 	for (uint i=0; i<256; ++i) {
 		uint p = buf[i] + 256U * buf[i+256];
 		if (p) {
-			if (isfree(p))
-				printf("  Data block %u is marked free!\n", p);
+			checkblock(p, "Data");
 			++(*blkcnt);
 		}
 	}
@@ -385,6 +439,7 @@ int saplingblocks(uchar device, uint keyblk, uint *blkcnt) {
  * Count the blocks in a tree file
  */
 int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
+	checkblock(keyblk, "Tree index");
 	if (readdiskblock(device, keyblk, buf2) == -1) {
 		printf("  Error reading blk %u\n", keyblk);
 		return -1;
@@ -393,8 +448,6 @@ int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
 	for (uint i=0; i<256; ++i) {
 		uint p = buf2[i] + 256U * buf2[i+256];
 		if (p) {
-			if (isfree(p))
-				printf("  Idx block %u is marked free!\n", p);
 			uint b;
 			if (saplingblocks(device, p, &b) == 0)
 				*blkcnt += b;
@@ -410,6 +463,7 @@ int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
  * See http://1000bit.it/support/manual/apple/technotes/pdos/tn.pdos.25.html
  */
 int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
+	checkblock(keyblk, "Fork key");
 	if (readdiskblock(device, keyblk, buf3) == -1) {
 		printf("  Error reading blk %u\n", keyblk);
 		return -1;
@@ -421,12 +475,10 @@ int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 	uchar type = buf3[0x00];
 	keyblk = buf3[0x01] + 256U * buf3[0x02];
 	uint blks = buf3[0x03] + 256U * buf3[0x04];
-	if (isfree(keyblk))
-		printf("  Data fork keyblock %u is marked free!\n", keyblk);
 	switch (type) {
 	case 0x1:
 		/* Seedling */
-		count = 1;
+		seedlingblocks(device, keyblk, &count);
 		break;
 	case 0x2:
 		/* Sapling */
@@ -453,12 +505,10 @@ int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 	type = buf3[0x100];
 	keyblk = buf3[0x101] + 256U * buf3[0x102];
 	blks = buf3[0x103] + 256U * buf3[0x104];
-	if (isfree(keyblk))
-		printf("  Resource fork keyblock %u is marked free!\n", keyblk);
 	switch (type) {
 	case 0x1:
 		/* Seedling */
-		count = 1;
+		seedlingblocks(device, keyblk, &count);
 		break;
 	case 0x2:
 		/* Sapling */
@@ -490,6 +540,8 @@ int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
                   uint blocknum, uint blkentries, uint *blkcnt) {
 
+	if (!dorecurse)
+		checkblock(keyblk, "Directory");
 	if (readdiskblock(device, keyblk, buf) == -1) {
 		printf("  Error reading keyblock %u\n", keyblk);
 		return -1;
@@ -516,6 +568,8 @@ int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
 
 	blocknum = buf[0x02] + 256U * buf[0x03];
 	while (blocknum) {
+		if (!dorecurse)
+			checkblock(blocknum, "Directory");
 		if (readdiskblock(device, blocknum, buf) == -1) {
 			printf("  Error reading dir block %u\n", blocknum);
 			return -1;
@@ -570,6 +624,7 @@ int readdir(uint device, uint blocknum) {
 	curblk->next = NULL;
 	curblk->blocknum = blocknum;
 
+	checkblock(blocknum, "Directory");
 	if (readdiskblock(device, blocknum, curblk->data) == -1) {
 		printf("Error reading dir block %d\n", blkcnt);
 		return 1;
@@ -654,9 +709,6 @@ int readdir(uint device, uint blocknum) {
 				printf("  Header ptr %u should be %u\n",
 				       hdrblk, hdrblknum);
 			}
-			if (isfree(keyblk))
-				printf("  Keyblock %u is marked free!\n",
-				       keyblk);
 			uint blks = ent->blksused[0] + 256U * ent->blksused[1];
 			uint count;
 			switch (ent->typ_len & 0xf0) {
@@ -668,7 +720,7 @@ int readdir(uint device, uint blocknum) {
 				break;
 			case 0x10:
 				/* Seedling */
-				count = 1;
+				seedlingblocks(device, keyblk, &count);
 				break;
 			case 0x20:
 				/* Sapling */
@@ -724,9 +776,11 @@ int readdir(uint device, uint blocknum) {
 			curblk->next = NULL;
 			curblk->blocknum = blocknum;
 			++blkcnt;
-			if (
-			  readdiskblock(device, blocknum, curblk->data) == -1) {
-				printf("  Error reading dir block %d\n", blkcnt);
+			checkblock(blocknum, "Directory");
+			if ( readdiskblock(device, blocknum,
+			                   curblk->data) == -1) {
+				printf("  Error reading dir block %d\n",
+				       blkcnt);
 				return 1;
 			}
 			/* Copy ptrs to sorteddata[], zero the rest */
@@ -1038,6 +1092,27 @@ done:
 	freeblocks();
 }
 
+/*
+ * Iterate through freelist[] and usedlist[] and see if all is well.
+ * If we have visited all files and directories on the volume, every
+ * block should either be marked free or marked used.
+ */
+void checkfreeandused(void) {
+	printf("Total blocks on volume %u\n", totblks);
+	for (uint i=0; i<totblks; ++i) {
+		uint idx = i / 8;
+		if (!(freelist[idx] ^ usedlist[i]))	/* Speed-up */
+			continue;
+		if (isfree(i)) {
+			if (isused(i))
+				printf("Blk %u used, marked free\n", i);
+		} else {
+			if (!isused(i))
+				printf("Blk %u unused, not marked free\n", i);
+		}
+	}
+}
+
 int main(int argc, char *argv[]) {
 	if (argc < 2) {
 		usage();
@@ -1086,6 +1161,9 @@ int main(int argc, char *argv[]) {
 			processdir(dev, blk);
 		}
 	}
+	checkfreeandused();
+	free(freelist);
+	free(usedlist);
 	return 0;
 }
 
