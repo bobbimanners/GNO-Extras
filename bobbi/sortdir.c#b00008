@@ -5,7 +5,6 @@
  * TODO: Error log file option
  * TODO: Fix mode
  * TODO: Sort by mtime, ctime
- * TODO: Tool for lower/upper/camel casing filenames
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
@@ -138,12 +137,16 @@ static uchar dowrite = 0;        /* -w write option */
 static uchar doverbose = 0;      /* -v verbose option */
 static uchar dodebug = 0;        /* -V very verbose option */
 static char sortopts[5] = "";    /* -s:abc list of sort options */
+static char caseopts[2] = "";    /* -c:x case conversion option */
 
 /* Prototypes */
 void prerr(char *s);
 int  readdiskblock(uchar device, uint blocknum, char *buf);
 int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers, uchar len);
+void lowercase(char *p, uchar len, uchar *minvers, uchar *vers);
+void uppercase(char *p, uchar len, uchar *minvers, uchar *vers);
+void initialcase(uchar mode, char *p, uchar len, uchar *minvers, uchar *vers);
 int  readfreelist(uchar device);
 int  isfree(uint blk);
 int  isused(uint blk);
@@ -254,6 +257,72 @@ void fixcase(char *in, char *out, uchar minvers, uchar vers, uchar len) {
 		minvers <<= 1;
 	}
 	out[len] = '\0';
+}
+
+/*
+ * Convert filename pointed to by p into lower case (which is recorded
+ * as a bitmap in the vers and minvers fields.
+ */
+void lowercase(char *p, uchar len, uchar *minvers, uchar *vers) {
+	uchar idx = 0;
+	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
+	*vers = 0x01;
+	*minvers = 0x00;
+	for (uint i=0; i<7; ++i) {
+		*vers <<= 1;
+		if ((idx < len) && isalpha(p[idx++]))
+			*vers |= 0x01;
+	}
+	for (uint i=0; i<8; ++i) {
+		*minvers <<= 1;
+		if ((idx < len) && isalpha(p[idx++]))
+			*minvers |= 0x01;
+	}
+	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
+}
+
+/*
+ * Convert filename pointed to by p into upper case (which is recorded
+ * as a bitmap in the vers and minvers fields.
+ */
+void uppercase(char *p, uchar len, uchar *minvers, uchar *vers) {
+	*vers = 0x00;
+	*minvers = 0x00;
+}
+
+/*
+ * Convert filename pointed to by p into to have first letter capitalized
+ * (which is recorded as a bitmap in the vers and minvers fields.
+ * If mode = 0 then just uppercase the initial char ("Read.me")
+ * otherwise camel-case the name ("Read.Me")
+ */
+void initialcase(uchar mode, char *p, uchar len, uchar *minvers, uchar *vers) {
+	uchar idx = 0;
+	uchar capsflag = 1;
+	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
+	*vers = 0x01;
+	*minvers = 0x00;
+	for (uint i=0; i<7; ++i) {
+		*vers <<= 1;
+		if ((idx < len) && isalpha(p[idx++]))
+			if (!capsflag)
+				*vers |= 0x01;
+		if ((mode == 1) && !isalpha(p[idx-1]))
+			capsflag = 1;
+		else
+			capsflag = 0;
+	}
+	for (uint i=0; i<8; ++i) {
+		*minvers <<= 1;
+		if ((idx < len) && isalpha(p[idx++]))
+			if (!capsflag)
+				*minvers |= 0x01;
+		if ((mode == 1) && !isalpha(p[idx-1]))
+			capsflag = 1;
+		else
+			capsflag = 0;
+	}
+	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
 }
 
 /*
@@ -674,6 +743,38 @@ int readdir(uint device, uint blocknum) {
 	while (1) {
 		struct pd_dirent *ent = (struct pd_dirent*)(curblk->data + idx);
 		if (ent->typ_len != 0) {
+
+			if (strlen(caseopts) > 0) {
+				switch (caseopts[0]) {
+				case 'u':
+					uppercase(ent->name,
+					          ent->typ_len & 0x0f,
+			                          &(ent->vers),
+					          &(ent->minvers));
+					break;
+				case 'l':
+					lowercase(ent->name,
+					          ent->typ_len & 0x0f,
+			                          &(ent->vers),
+					          &(ent->minvers));
+					break;
+				case 'i':
+					initialcase(0,
+					            ent->name,
+					            ent->typ_len & 0x0f,
+			                            &(ent->vers),
+					            &(ent->minvers));
+					break;
+				case 'c':
+					initialcase(1,
+					            ent->name,
+					            ent->typ_len & 0x0f,
+			                            &(ent->vers),
+					            &(ent->minvers));
+					break;
+				}
+			}
+
 			fixcase(ent->name, namebuf,
 			        ent->vers, ent->minvers, ent->typ_len & 0x0f);
 #ifdef CHECK
@@ -1113,15 +1214,24 @@ void freeblocks(void) {
 	blocks = NULL;
 }
 
+segment "extra";
+
 void usage(void) {
 	prerr("usage: sortdir [-s xxx] [-rwv] path\n");
 	prerr("  Options: -s xxx  Directory sort options");
+	prerr("           -c x    upper/lower case options");
 	prerr("           -r      Recursive descent");
 	prerr("           -D      Whole-disk mode (implies -r)");
 	prerr("           -w      Enable writing to disk");
 	prerr("           -v      Verbose output");
 	prerr("           -V      Verbose debugging output");
 	prerr("           -h      This help");
+	prerr("");
+	prerr("Upper/lower case option x:");
+	prerr("  l  convert filenames to lower case             eg: read.me");
+	prerr("  u  convert filenames to upper case             eg: READ.ME");
+	prerr("  i  convert filenames to initial upper case     eg: Read.me");
+	prerr("  c  convert filenames to camel case             eg: Read.Me");
 	prerr("");
 	prerr("Directory sort options xxx, is a list of fields on which to");
 	prerr("sort. The sort options are processed left-to-right.");
@@ -1210,8 +1320,11 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "DrhwvVs:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:DrhwvVs:")) != -1) {
 		switch (opt) {
+		case 'c':
+			strncpy(caseopts, optarg, 1);
+			break;
 		case 'D':
 			dowholedisk = 1;
 			dorecurse = 1;
