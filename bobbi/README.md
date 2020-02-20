@@ -24,8 +24,8 @@ Directory sort options xxx, is a list of fields on which to
 sort. The sort options are processed left-to-right.
   n  sort by filename ascending
   N  sort by filename descending
-  d  sort by modification (or creation [-k]) date ascending
-  D  sort by modification (or creation [-k]) date descending
+  d  sort by modification (or creation [-c]) date ascending
+  D  sort by modification (or creation [-c]) date descending
   t  sort by type ascending
   T  sort by type descending
   f  sort folders (directories) to top
