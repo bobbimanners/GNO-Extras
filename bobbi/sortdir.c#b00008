@@ -1330,8 +1330,8 @@ void usage(void) {
 	prerr("sort. The sort options are processed left-to-right.");
 	prerr("  n  sort by filename ascending");
 	prerr("  N  sort by filename descending");
-	prerr("  d  sort by modification (or creation [-k]) date ascending");
-	prerr("  D  sort by modification (or creation [-k]) date descending");
+	prerr("  d  sort by modification (or creation [-c]) date ascending");
+	prerr("  D  sort by modification (or creation [-c]) date descending");
 	prerr("  t  sort by type ascending");
 	prerr("  T  sort by type descending");
 	prerr("  f  sort folders (directories) to top");
