@@ -4,7 +4,6 @@
  * TODO: Error counting & fix error return codes
  * TODO: Error log file option
  * TODO: Fix mode
- * TODO: Sort by mtime, ctime
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
@@ -100,13 +99,14 @@ struct block {
  * Entry for array of filenames used by qsort()
  */
 struct fileent {
-	char  name[NMLEN+1];/* Name converted to upper/lower case */
-	uchar type;         /* ProDOS file type */
-	uint  blocks;       /* Size in blocks */
-	ulong eof;          /* EOF position in bytes */
-	uint  order;        /* Hack to make qsort() stable */
-	uchar blockidx;     /* Index of dir block (1,2,3 ...)  */
-	uchar entrynum;	    /* Entry within the block */
+	char  name[NMLEN+1]; /* Name converted to upper/lower case */
+	char  datetime[20];  /* Date/time as a yyyy-mm-dd hh:mm string */
+	uchar type;          /* ProDOS file type */
+	uint  blocks;        /* Size in blocks */
+	ulong eof;           /* EOF position in bytes */
+	uint  order;         /* Hack to make qsort() stable */
+	uchar blockidx;      /* Index of dir block (1,2,3 ...)  */
+	uchar entrynum;	     /* Entry within the block */
 };
 
 /*
@@ -115,6 +115,18 @@ struct fileent {
 struct dirblk {
 	uint          blocknum;
 	struct dirblk *next;
+};
+
+/*
+ * Represents a date and time
+ */
+struct datetime {
+	uint  year;
+	uchar month;
+	uchar day;
+	uchar hour;
+	uchar minute;
+	uchar ispd25format;
 };
 
 /* Globals */
@@ -136,17 +148,20 @@ static uchar dorecurse = 0;      /* -r recurse option */
 static uchar dowrite = 0;        /* -w write option */
 static uchar doverbose = 0;      /* -v verbose option */
 static uchar dodebug = 0;        /* -V very verbose option */
+static uchar do_ctime = 0;       /* -k ctime option */
 static char sortopts[5] = "";    /* -s:abc list of sort options */
 static char caseopts[2] = "";    /* -c:x case conversion option */
 
 /* Prototypes */
 void prerr(char *s);
+void hline(void);
 int  readdiskblock(uchar device, uint blocknum, char *buf);
 int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers, uchar len);
 void lowercase(char *p, uchar len, uchar *minvers, uchar *vers);
 void uppercase(char *p, uchar len, uchar *minvers, uchar *vers);
 void initialcase(uchar mode, char *p, uchar len, uchar *minvers, uchar *vers);
+void convertdatetime(uchar time[4], struct datetime *dt);
 int  readfreelist(uchar device);
 int  isfree(uint blk);
 int  isused(uint blk);
@@ -162,6 +177,8 @@ void enqueuesubdir(uint blocknum, uint subdiridx);
 int  readdir(uint device, uint blocknum);
 int  cmp_name_asc(const void *a, const void *b);
 int  cmp_name_desc(const void *a, const void *b);
+int  cmp_datetime_asc(const void *a, const void *b);
+int  cmp_datetime_desc(const void *a, const void *b);
 int  cmp_type_asc(const void *a, const void *b);
 int  cmp_type_desc(const void *a, const void *b);
 int  cmp_dir_beg(const void *a, const void *b);
@@ -185,6 +202,12 @@ void checkfreeandused(void);
 void prerr(char *s) {
 	fputs(s, stderr);
 	fputs("\n", stderr);
+}
+
+/* Horizontal line */
+void hline(void) {
+	for (uint i=0; i<80; ++i)
+		putchar('-');
 }
 
 /*
@@ -397,6 +420,39 @@ ret:
 	if (fp)
 		close(fp);
 	return rv;
+}
+
+segment "extra";
+
+/*
+ * Parse mtime or ctime fields and populate the fields of the datetime struct
+ * Supports the legacy ProDOS date/time format as used by ProDOS 1.0->2.4.0
+ * and also the new format introduced with ProDOS 2.5.
+ */
+void convertdatetime(uchar time[4], struct datetime *dt) {
+	uint d = time[0] + 256U * time[1];
+	uint t = time[2] + 256U * time[3];
+	if (!(t & 0xe000)) {
+		/* ProDOS 1.0 to 2.4.2 date format */
+		dt->year   = (d & 0xfe00) >> 9;
+		dt->month  = (d & 0x01e0) >> 5;
+		dt->day    = d & 0x001f;
+		dt->hour   = (t & 0x1f00) >> 8;
+		dt->minute = t & 0x003f;
+		dt->ispd25format = 0;
+		if (dt->year < 40) /* See ProDOS-8 Tech Note 48 */
+			dt->year += 2000;
+		else
+			dt->year += 1900;
+	} else {
+		/* ProDOS 2.5.0+ */
+		dt->year   = t & 0x0fff;
+		dt->month  = ((t & 0xf000) >> 12) - 1;
+		dt->day    = (d & 0xf800) >> 11;
+           	dt->hour   = (d & 0x07c0) >> 6; 
+		dt->minute = d & 0x003f;
+		dt->ispd25format = 1;
+	}
 }
 
 /*
@@ -717,9 +773,9 @@ int readdir(uint device, uint blocknum) {
 	fixcase(hdr->name, namebuf,
 	        hdr->vers, hdr->minvers, hdr->typ_len & 0x0f);
 
-	puts("---------------------------------------------------------");
+	hline();
 	printf("Directory %s (%d entries)\n", namebuf, filecount);
-	puts("---------------------------------------------------------");
+	hline();
 
 	/* Copy pointers and header to sorteddata[], zero the rest */
 	bzero(curblk->sorteddata, BLKSZ);
@@ -815,6 +871,15 @@ int readdir(uint device, uint blocknum) {
 			filelist[numfiles].entrynum = blkentries;
 			filelist[numfiles].blocks = blks;
 			filelist[numfiles].eof = eof;
+
+			struct datetime dt;
+			convertdatetime(do_ctime ? ent->ctime : ent->mtime,
+			                &dt);
+			sprintf(filelist[numfiles].datetime,
+			        "%04d-%02d-%02d %02d:%02d %s",
+			        dt.year, dt.month, dt.day, dt.hour, dt.minute,
+			        (dt.ispd25format ? "*" : " "));
+
 #ifdef CHECK
 			uint keyblk = ent->keyptr[0] + 256U * ent->keyptr[1];
 			uint hdrblk = ent->hdrptr[0] + 256U * ent->hdrptr[1];
@@ -924,6 +989,22 @@ int cmp_name_asc(const void *a, const void *b) {
 int cmp_name_desc(const void *a, const void *b) {
 	return strncmp(((struct fileent*)b)->name,
 	               ((struct fileent*)a)->name, NMLEN);
+}
+
+/*
+ * Compare - date/time sort in ascending order
+ */
+int cmp_datetime_asc(const void *a, const void *b) {
+	return strncmp(((struct fileent*)a)->datetime,
+	               ((struct fileent*)b)->datetime, 16);
+}
+
+/*
+ * Compare - date/time sort in descending order
+ */
+int cmp_datetime_desc(const void *a, const void *b) {
+	return strncmp(((struct fileent*)b)->datetime,
+	               ((struct fileent*)a)->datetime, 16);
 }
 
 /*
@@ -1042,6 +1123,14 @@ void sortlist(char s) {
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_name_desc);
 		break;
+	case 'd':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_datetime_asc);
+		break;
+	case 'D':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_datetime_desc);
+		break;
 	case 't':
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_type_asc);
@@ -1050,11 +1139,11 @@ void sortlist(char s) {
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_type_desc);
 		break;
-	case 'd':
+	case 'f':
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_dir_beg);
 		break;
-	case 'D':
+	case 'F':
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_dir_end);
 		break;
@@ -1084,9 +1173,13 @@ void sortlist(char s) {
  * Print the file info stored in filelist[]
  */
 void printlist(void) {
-	puts("---------------------------------------------------------");
+	hline();
 	printf("numfiles=%u\n", numfiles);
-	puts("Dirblk Entry Type : Name            : Blocks      EOF");
+	fputs("Dirblk Entry Type : Name            : Blocks      EOF ", stdout);
+	if (do_ctime)
+		puts("Created");
+	else
+		puts("Modified");
 	for (uint i=0; i<numfiles; ++i) {
 		printf("   %03u    %02u   %02x : %s",
 		       filelist[i].blockidx,
@@ -1095,9 +1188,10 @@ void printlist(void) {
 		       filelist[i].name);
 		for (uint j=0; j<(16-strlen(filelist[i].name)); ++j)
 			putchar(' ');
-		printf(": %5u  %8lu\n", filelist[i].blocks, filelist[i].eof);
+		printf(": %5u  %8lu", filelist[i].blocks, filelist[i].eof);
+		printf(" %s\n", filelist[i].datetime);
 	}
-	puts("---------------------------------------------------------");
+	hline();
 }
 
 /*
@@ -1214,15 +1308,14 @@ void freeblocks(void) {
 	blocks = NULL;
 }
 
-segment "extra";
-
 void usage(void) {
 	prerr("usage: sortdir [-s xxx] [-rwv] path\n");
 	prerr("  Options: -s xxx  Directory sort options");
-	prerr("           -c x    upper/lower case options");
+	prerr("           -n x    Filename upper/lower case options");
 	prerr("           -r      Recursive descent");
 	prerr("           -D      Whole-disk mode (implies -r)");
 	prerr("           -w      Enable writing to disk");
+	prerr("           -c      Use creation time rather than modification");
 	prerr("           -v      Verbose output");
 	prerr("           -V      Verbose debugging output");
 	prerr("           -h      This help");
@@ -1237,10 +1330,12 @@ void usage(void) {
 	prerr("sort. The sort options are processed left-to-right.");
 	prerr("  n  sort by filename ascending");
 	prerr("  N  sort by filename descending");
+	prerr("  d  sort by modification (or creation [-k]) date ascending");
+	prerr("  D  sort by modification (or creation [-k]) date descending");
 	prerr("  t  sort by type ascending");
 	prerr("  T  sort by type descending");
-	prerr("  d  sort directories to top");
-	prerr("  D  sort directories to bottom");
+	prerr("  f  sort folders (directories) to top");
+	prerr("  F  sort folders (directories) to bottom");
 	prerr("  b  sort by blocks used ascending");
 	prerr("  B  sort by blocks used descending");
 	prerr("  e  sort by EOF position ascending");
@@ -1320,10 +1415,10 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "c:DrhwvVs:")) != -1) {
+	while ((opt = getopt(argc, argv, "cDrwvVs:n:h")) != -1) {
 		switch (opt) {
 		case 'c':
-			strncpy(caseopts, optarg, 1);
+			do_ctime = 1;
 			break;
 		case 'D':
 			dowholedisk = 1;
@@ -1331,9 +1426,6 @@ int main(int argc, char *argv[]) {
 			break;
 		case 'r':
 			dorecurse = 1;
-			break;
-		case 's':
-			strncpy(sortopts, optarg, 5);
 			break;
 		case 'w':
 			dowrite = 1;
@@ -1343,6 +1435,12 @@ int main(int argc, char *argv[]) {
 			break;
 		case 'V':
 			dodebug = 1;
+			break;
+		case 's':
+			strncpy(sortopts, optarg, 5);
+			break;
+		case 'n':
+			strncpy(caseopts, optarg, 1);
 			break;
 		case 'h':
 		default:
