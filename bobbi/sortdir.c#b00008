@@ -8,7 +8,6 @@
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
  * TODO: Improve output and user interface
- * TODO: Needs a manpage
  * TODO: Maybe make a version that doesn't need GNO
  */
 

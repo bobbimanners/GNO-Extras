@@ -1,0 +1,104 @@
+.TH SORTDIR 1 "Feb 19 2020" "GNO" "Commands and Applications"
+.SH NAME
+.BR sortdir
+\- tool for sorting directories, converting the case of filenames and/or testing the integrity of individual directories or entire ProDOS filesystems
+.SH SYNOPSIS
+.BR sortdir " [" "-s xxx -n x -rDwcvVh" ]
+.IR directory
+.SH DESCRIPTION
+The
+.BR sortdir
+utility provides tools for sorting and compacting ProDOS and GSOS directories on disk and performs integrity checking of the structure of directories and entire ProDOS filesystems.
+.BR sortdir
+is also able to convert filenames to upper case, lower case or initial capital letters.
+The
+.IR directory
+argument is the starting directory.
+.LP
+.SS OPTIONS
+.IP \fB-s xxx\fR
+Sorts the ProDOS directory (or directories if \fB-r\fR or \fB-D\fR is specified.)  A sequence of letters following the \fB-s\fR flag specifies a sequence of sorting operations to be performed.  The directory will be sorted according to these sort fields in sequence from left to right.  The sorting options are as follows:
+.HP
+n: Sort by filename, in ascending ASCII order
+.HP
+N: Sort by filename, in descending ASCII order
+.HP
+d: Sort by modification date (or creation date if \fB-c\fR flag is given), in ascending order
+.HP
+D: Sort by modification date (or creation date if \fB-c\fR flag is given), in descending order
+.HP
+t: Sort by file type, in ascending order
+.HP
+T: Sort by file type, in descending order
+.HP
+f: Sort with folders (directories) at the top
+.HP
+F: Sort with folders (directories) at the bottom
+.HP
+b: Sort by blocks used in ascending order
+.HP
+B: Sort by blocks used in descending order
+.HP
+e: Sort by EOF position in ascending order
+.HP
+E: Sort by EOF position in descending order
+
+.IP \fB-n x\fR
+Modify the case of ProDOS filenames, according to the option flag following the \fB-n\fR flag, as follows:
+.HP
+l: Convert filenames to lower case (eg: read.me)
+.HP
+u: Convert filenames to upper case (eg: READ.ME)
+.HP
+i: Convert filenames to initial upper case (eg: Read.me)
+.HP
+c: Convert filenames to camel case (eg: Read.Me)
+
+.IP \fB-r\fR
+Enables the recursive descent option. When \fB-r\fR is specified, the
+.BR sortdir
+utility will process the starting directory and will then recursively process all subdirectories in a depth-first manner.
+.IP \fB-D\fR
+Enables the 'whole volume' mode.  This mode implies \fB-r\fR. Whole volume mode processes all directories on the entire ProDOS or GSOS volume, starting from the top-level volume directory. The starting directory is used only to determine which volume to process. Because whole disk mode scans the entire volume this mode also performs checking there are no blocks marked as allocated on the free list which are in fact unused.
+.IP \fB-w\fR
+Enables writing changes to disk. The default is not to write anything to disk, so this option must be specified explicitly.
+.IP \fB-c\fR
+Display the creation time of the files rather than the modification time.  If \fB-c\fR is specified then the date sorting options \fB-sd\fR and \fB-sD\fR will also use creation time instead of modification time.
+.IP \fB-v\fR
+Enable verbose output. This flag provides much more detailed reporting.
+.IP \fB-V\fR
+Enable verbose debugging output. This is intended for developer use only.
+.IP \fB-h\fR
+Display brief usage information.
+.RE
+.LP
+The
+.BR sortdir
+utility exits 0 on success, and >0 if an error occurs.
+.SH USAGE
+.BR sortdir
+is extremely powerful and supports many different use cases.  A few examples are given here.
+.PP
+sortdir -snf -w .
+.PP
+Sort the current directory by filename in ascending order, then sort the folders to the top. Write the changes to disk, updating the current directory.
+.PP
+sortdir -rv /H1
+.PP
+Recursively check all directories under volume /H1, with verbose output enabled.
+.PP
+sortdir -Dv .
+.PP
+Do whole-volume check on the current volume, which includes checking that no blocks are allocated to more than one file or directory and that all free blocks are listed on the freelist. Enable verbose output.
+.PP
+sortdir -rc -sD -cl -w /bobbi/devel
+.PP
+Sort all directories under /bobbi/devel recursively in descending order of creation time. Convert all filenames to lower case. Write the changes to disk.
+.SH WARNINGS
+When the \fB-w\fR option is used to write changes to disk any malfunction of the 
+.BR sortdir
+utility could cause severe directory or disk volume corruption, which could result in data loss. Always backup any important disks before using
+.BR sortdir
+in write mode.
+.SH AUTHOR
+Bobbi Webber-Manners. bobbi.manners@gmail.com.
