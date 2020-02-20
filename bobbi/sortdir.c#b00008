@@ -1309,7 +1309,7 @@ void freeblocks(void) {
 }
 
 void usage(void) {
-	prerr("usage: sortdir [-s xxx] [-rwv] path\n");
+	prerr("usage: sortdir [-s xxx] [-n x] [-rDwcvVh] path\n");
 	prerr("  Options: -s xxx  Directory sort options");
 	prerr("           -n x    Filename upper/lower case options");
 	prerr("           -r      Recursive descent");
