@@ -1341,7 +1341,7 @@ void usage(void) {
 	prerr("  e  sort by EOF position ascending");
 	prerr("  E  sort by EOF position descending");
 	prerr("");
-	prerr("e.g.: sortdir -w -s nd .");
+	prerr("e.g.: sortdir -w -s nf .");
 	prerr("Will sort the current directory first by name (ascending),");
 	prerr("then sort directories to the top, and will write the sorted");
 	prerr("directory to disk.");
