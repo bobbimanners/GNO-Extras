@@ -35,7 +35,7 @@ sort. The sort options are processed left-to-right.
   e  sort by EOF position ascending
   E  sort by EOF position descending
 
-e.g.: sortdir -w -s nd .
+e.g.: sortdir -w -s nf .
 Will sort the current directory first by name (ascending),
 then sort directories to the top, and will write the sorted
 directory to disk.
