@@ -133,6 +133,7 @@ static uint totblks;             /* Total # blocks on volume */
 static uchar *freelist;          /* Free-list bitmap */
 static uchar *usedlist;          /* Bit map of used blocks */
 static uchar flloaded = 0;       /* 1 if free-list has been loaded */
+static char currdir[NMLEN+1];    /* Name of directory currently processed */
 static struct block *blocks = NULL;
 static struct dirblk *dirs = NULL;
 static struct fileent filelist[MAXFILES];
@@ -243,6 +244,12 @@ int writediskblock(uchar device, uint blocknum, char *buf) {
 #ifdef DEBUG
 	printf("Writing dev %2u block %5u\n", device, blocknum);
 #endif
+	if ((strcmp(currdir, "LIB") == 0) ||
+	    (strcmp(currdir, "LIBRARIES") == 0)) {
+		puts("Not writing library directory");
+		return 0;
+	}
+	ResetCacheGS(0); /* Disable block caching */
 	DIORecGS dr;
 	dr.pCount = 6;
 	dr.devNum = device;
@@ -767,13 +774,12 @@ int readdir(uint device, uint blocknum) {
 	entperblk       = hdr->entperblk;
 	uint filecount  = hdr->filecnt[0] + 256U * hdr->filecnt[1];
 
-	static char namebuf[NMLEN+1];
 
-	fixcase(hdr->name, namebuf,
+	fixcase(hdr->name, currdir,
 	        hdr->vers, hdr->minvers, hdr->typ_len & 0x0f);
 
 	hline();
-	printf("Directory %s (%d entries)\n", namebuf, filecount);
+	printf("Directory %s (%d entries)\n", currdir, filecount);
 	hline();
 
 	/* Copy pointers and header to sorteddata[], zero the rest */
@@ -829,6 +835,8 @@ int readdir(uint device, uint blocknum) {
 					break;
 				}
 			}
+
+			static char namebuf[NMLEN+1];
 
 			fixcase(ent->name, namebuf,
 			        ent->vers, ent->minvers, ent->typ_len & 0x0f);
@@ -1255,7 +1263,7 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 			}
 		} else {
 			if (doverbose)
-				puts("Not writing updated subdir to disk");
+				puts("Not writing updated subdir without -w");
 		}
 	}
 }
