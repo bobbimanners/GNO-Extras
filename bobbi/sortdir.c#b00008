@@ -155,6 +155,7 @@ static char caseopts[2] = "";    /* -c:x case conversion option */
 /* Prototypes */
 void prerr(char *s);
 void hline(void);
+void flushall(void);
 int  readdiskblock(uchar device, uint blocknum, char *buf);
 int  writediskblock(uchar device, uint blocknum, char *buf);
 void fixcase(char *in, char *out, uchar minvers, uchar vers, uchar len);
@@ -211,6 +212,17 @@ void hline(void) {
 }
 
 /*
+ * Disable GSOS block cache and flush any unwritten changes
+ */
+void flushall(void) {
+	ResetCacheGS(0); /* Disable block caching */
+	short ff[2];
+	ff[0] = 1;
+	ff[1] = 0;
+	FlushGS(ff);
+}
+
+/*
  * Read block from disk using ProDOS call
  * buf must point to buffer with at least 512 bytes
  */
@@ -249,7 +261,7 @@ int writediskblock(uchar device, uint blocknum, char *buf) {
 		puts("Not writing library directory");
 		return 0;
 	}
-	ResetCacheGS(0); /* Disable block caching */
+	flushall();
 	DIORecGS dr;
 	dr.pCount = 6;
 	dr.devNum = device;
@@ -1360,6 +1372,7 @@ void usage(void) {
  * blocknum is the keyblock of the directory to process
  */
 void processdir(uint device, uint blocknum) {
+	flushall();
 	uchar err = readdir(device, blocknum);
 	if (doverbose) {
 		printlist();
