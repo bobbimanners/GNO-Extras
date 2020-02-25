@@ -2,7 +2,6 @@
  * Bobbi January-February 2020
  *
  * TODO: Fix mode
- * TODO: Do-nothing sort option for use with case-change option
  * TODO: Case insensitive sort option
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
@@ -195,6 +194,7 @@ int  cmp_blocks_asc(const void *a, const void *b);
 int  cmp_blocks_desc(const void *a, const void *b);
 int  cmp_eof_asc(const void *a, const void *b);
 int  cmp_eof_desc(const void *a, const void *b);
+int  cmp_noop(const void *a, const void *b);
 void sortlist(char s);
 void printlist(void);
 uint blockidxtoblocknum(uint idx);
@@ -1160,6 +1160,15 @@ int  cmp_eof_desc(const void *a, const void *b) {
 }
 
 /*
+ * No-op sort which just keeps items in the same order
+ */
+int  cmp_noop(const void *a, const void *b) {
+	struct fileent *aa = (struct fileent*)a;
+	struct fileent *bb = (struct fileent*)b;
+	return aa->order - bb->order;
+}
+
+/*
  * Sort filelist[]
  * s defines the field to sort on
  */
@@ -1215,6 +1224,10 @@ void sortlist(char s) {
 	case 'E':
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_eof_desc);
+		break;
+	case '.':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_noop);
 		break;
 	default:
 		err(FATALBADARG, "Invalid sort option");
@@ -1504,7 +1517,10 @@ int main(int argc, char *argv[]) {
 
 	if (optind != argc - 1)
 		usage();
-	
+
+	if ((strlen(caseopts) > 0) && (strlen(sortopts) == 0))
+		strncpy(sortopts, ".", 1);
+
 	uchar dev;
 	uint blk;
 	if (firstblk(argv[optind], &dev, &blk) != 0) {
