@@ -1,32 +1,32 @@
 /*
  * Bobbi January-February 2020
  *
- * TODO: Error counting & fix error return codes
- * TODO: Error log file option
  * TODO: Fix mode
+ * TODO: Do-nothing sort option for use with case-change option
+ * TODO: Case insensitive sort option
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
- * TODO: Improve output and user interface
- * TODO: Maybe make a version that doesn't need GNO
+ * TODO: Make a version that doesn't need GNO - eliminate call to stat()
  */
 
-#pragma debug 25	/* Enable stack checking */
+#pragma debug 9
 #pragma lint -1
 #pragma stacksize 16384
 #pragma memorymodel 0
+#pragma optimize -1      /* Disable stack repair code */
 
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <orca.h>
 #include <gsos.h>
 #include <prodos.h>
-
 
 #undef DEBUG            /* Enable additional debug printout */
 #define CHECK		/* Perform additional integrity checking */
@@ -81,6 +81,12 @@ struct pd_dirent {
 #define BLKSZ 512	/* 512 byte blocks */
 #define PTRSZ 4		/* 4 bytes of pointers at beginning of each blk */
 #define FLSZ 8192	/* Bytes required for 64K block free-list */
+
+/* Exit codes */
+#define EXIT_SUCCESS    0
+#define EXIT_BAD_ARG    1
+#define EXIT_ALLOC_ERR  2
+#define EXIT_FATAL_ERR  3
 
 /*
  * Linked list of directory blocks read from disk
@@ -143,6 +149,7 @@ static uchar entperblk;          /* Number of entries per block */
 static char buf[BLKSZ];          /* General purpose scratch buffer */
 static char buf2[BLKSZ];         /* General purpose scratch buffer */
 static char buf3[BLKSZ];         /* General purpose scratch buffer */
+static uint errcount = 0;        /* Error counter */
 static uchar dowholedisk = 0;    /* -D whole-disk option */
 static uchar dorecurse = 0;      /* -r recurse option */
 static uchar dowrite = 0;        /* -w write option */
@@ -153,8 +160,8 @@ static char sortopts[5] = "";    /* -s:abc list of sort options */
 static char caseopts[2] = "";    /* -c:x case conversion option */
 
 /* Prototypes */
-void prerr(char *s);
 void hline(void);
+void err(enum errtype severity, char *fmt, ...);
 void flushall(void);
 int  readdiskblock(uchar device, uint blocknum, char *buf);
 int  writediskblock(uchar device, uint blocknum, char *buf);
@@ -199,16 +206,45 @@ void usage(void);
 void processdir(uint device, uint blocknum);
 void checkfreeandused(void);
 
-/* Print error string to stderr */
-void prerr(char *s) {
-	fputs(s, stderr);
-	fputs("\n", stderr);
-}
-
 /* Horizontal line */
 void hline(void) {
 	for (uint i=0; i<80; ++i)
 		putchar('-');
+}
+
+enum errtype {WARN, NONFATAL, FATAL, FATALALLOC, FATALBADARG, FINISHED};
+
+/*
+ * Display error message
+ */
+void err(enum errtype severity, char *fmt, ...) {
+	if (severity == FINISHED) {
+		hline();
+		if (errcount == 0)
+			printf("Done - no errors found.\n");
+		else
+			printf("Done - %u errors\n", errcount);
+		hline();
+		exit(EXIT_SUCCESS);
+	}
+	++errcount;
+	fputs("  ", stdout);
+	va_list v;
+	va_start(v, fmt);
+	vprintf(fmt, v);
+	putchar('\n');
+	va_end(v);
+	switch (severity) {
+	case FATAL:
+		printf("Stopping after %u errors\n", errcount);
+		exit(EXIT_FATAL_ERR);
+	case FATALALLOC:
+		printf("Stopping after %u errors\n", errcount);
+		exit(EXIT_ALLOC_ERR);
+	case FATALBADARG:
+		printf("Stopping after %u errors\n", errcount);
+		exit(EXIT_BAD_ARG);
+	}
 }
 
 /*
@@ -233,7 +269,7 @@ int readdiskblock(uchar device, uint blocknum, char *buf) {
 #ifdef CHECK
 	if (flloaded)
 		if (isfree(blocknum))
-			printf("  Block %u is marked free!\n", blocknum);
+			err(NONFATAL, "Block %u is marked free!", blocknum);
 #endif
 	BlockRec br;
 	br.blockDevNum = device;
@@ -242,7 +278,7 @@ int readdiskblock(uchar device, uint blocknum, char *buf) {
 	READ_BLOCK(&br);
 	int rc = toolerror();
 	if (rc) {
-		printf("  READ_BLOCK failed, err=%x\n", rc);
+		err(FATAL, "Block read failed, err=%x", rc);
 		return -1;
 	}
 	return 0;
@@ -258,7 +294,7 @@ int writediskblock(uchar device, uint blocknum, char *buf) {
 #endif
 	if ((strcmp(currdir, "LIB") == 0) ||
 	    (strcmp(currdir, "LIBRARIES") == 0)) {
-		puts("Not writing library directory");
+		printf("Not writing library directory %s\n", currdir);
 		return 0;
 	}
 	flushall();
@@ -270,8 +306,10 @@ int writediskblock(uchar device, uint blocknum, char *buf) {
 	dr.startingBlock = blocknum;
 	dr.blockSize = BLKSZ;
 	DWriteGS(&dr);
-	if (dr.transferCount != BLKSZ)
+	if (dr.transferCount != BLKSZ) {
+		err(FATAL, "Block write failed");
 		return -1;
+	}
 	return 0;
 }
 
@@ -306,7 +344,6 @@ void fixcase(char *in, char *out, uchar minvers, uchar vers, uchar len) {
  */
 void lowercase(char *p, uchar len, uchar *minvers, uchar *vers) {
 	uchar idx = 0;
-	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
 	*vers = 0x01;
 	*minvers = 0x00;
 	for (uint i=0; i<7; ++i) {
@@ -319,7 +356,6 @@ void lowercase(char *p, uchar len, uchar *minvers, uchar *vers) {
 		if ((idx < len) && isalpha(p[idx++]))
 			*minvers |= 0x01;
 	}
-	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
 }
 
 /*
@@ -340,7 +376,6 @@ void uppercase(char *p, uchar len, uchar *minvers, uchar *vers) {
 void initialcase(uchar mode, char *p, uchar len, uchar *minvers, uchar *vers) {
 	uchar idx = 0;
 	uchar capsflag = 1;
-	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
 	*vers = 0x01;
 	*minvers = 0x00;
 	for (uint i=0; i<7; ++i) {
@@ -363,8 +398,9 @@ void initialcase(uchar mode, char *p, uchar len, uchar *minvers, uchar *vers) {
 		else
 			capsflag = 0;
 	}
-	//printf("vers 0x%2x minvers 0x%2x\n", *vers, *minvers);
 }
+
+segment "extra";
 
 /*
  * Read the first block of a directory and deduce the device ID and block
@@ -376,28 +412,24 @@ uchar firstblk(char *dirname, uchar *device, uint *block) {
 
 	fp = open(dirname, O_RDONLY);
 	if (!fp) {
-		printf("Error opening dir %s\n", dirname);
+		err(NONFATAL, "Error opening dir %s", dirname);
 		rv = 1;
 		goto ret;
 	}
 
 	ssize_t len = read(fp, buf, BLKSZ);
 	if (len != BLKSZ) {
-		printf("Error reading first block of dir %s", dirname);
+		err(NONFATAL, "Error reading first block of dir %s", dirname);
 		rv = 1;
 		goto ret;
 	}
 
 	struct stat st;
-	if (stat(dirname, &st) == -1) {
-		printf("Can't stat %s\n", dirname);
-		exit(1);
-	}
+	if (stat(dirname, &st) == -1)
+		err(FATAL, "Can't stat %s", dirname);
 
-	if (!S_ISDIR(st.st_mode)) {
-		printf("%s is not a directory\n", dirname);
-		exit(1);
-	}
+	if (!S_ISDIR(st.st_mode))
+		err(FATAL, "%s is not a directory", dirname);
 
 	*device = st.st_dev;
 
@@ -411,7 +443,7 @@ uchar firstblk(char *dirname, uchar *device, uint *block) {
 
 #ifdef CHECK
 	if ((hdr->typ_len & 0xf0) != 0xe0) {
-		puts("Bad storage type");
+		err(NONFATAL, "Bad storage type");
 		rv = 1;
 		goto ret;
 	}
@@ -423,11 +455,8 @@ uchar firstblk(char *dirname, uchar *device, uint *block) {
 	uint parententlen = hdr->parentlen;
 
 	/* Read parent directory block */
-	if (readdiskblock(*device, parentblk, buf) == -1) {
-		printf("Can't read parent directory for %s", dirname);
-		rv = 1;
-		goto ret;
-	}
+	if (readdiskblock(*device, parentblk, buf) == -1)
+		err(FATAL, "Can't read parent directory for %s", dirname);
 
 	struct pd_dirent *ent =
 	  (struct pd_dirent *)(buf + PTRSZ + (parententry-1) * parententlen);
@@ -439,8 +468,6 @@ ret:
 		close(fp);
 	return rv;
 }
-
-segment "extra";
 
 /*
  * Parse mtime or ctime fields and populate the fields of the datetime struct
@@ -478,21 +505,17 @@ void convertdatetime(uchar time[4], struct datetime *dt) {
  */
 int readfreelist(uchar device) {
 	freelist = (uchar*)malloc(FLSZ);
-	if (!freelist) {
-		puts("** Unable to allocate memory **");
-		exit(3);
-	}
+	if (!freelist)
+		err(FATALALLOC, "** Unable to allocate memory **");
 	bzero(freelist, FLSZ);
 	usedlist = (uchar*)malloc(FLSZ);
-	if (!usedlist) {
-		puts("** Unable to allocate memory **");
-		exit(3);
-	}
+	if (!usedlist)
+		err(FATALALLOC, "** Unable to allocate memory **");
 	bzero(usedlist, FLSZ);
 	markused(0); /* Boot block */
 	markused(1); /* SOS boot block */
 	if (readdiskblock(device, 2, buf) == -1) {
-		puts("Error reading volume dir");
+		err(NONFATAL, "Error reading volume dir");
 		return -1;
 	}
 	uint flblk = buf[0x27] + 256U * buf[0x28];
@@ -506,7 +529,7 @@ int readfreelist(uchar device) {
 	for (uint i=0; i<flsize; ++i) {
 		markused(flblk);
 		if (readdiskblock(device, flblk++, p) == -1) {
-			puts("Error reading free list");
+			err(NONFATAL, "Error reading free list");
 			return -1;
 		}
 		p += BLKSZ;
@@ -537,7 +560,6 @@ int isused(uint blk) {
  * Mark a block as used
  */
 void markused(uint blk) {
-	//printf("markused(%u)\n", blk);
 	uint idx = blk / 8;
 	uint bit = blk % 8;
 	usedlist[idx] |= (0x80 >> bit);
@@ -550,9 +572,9 @@ void markused(uint blk) {
  */
 void checkblock(uint blk, char *msg) {
 	if (isfree(blk))
-		printf("  %s block %u is marked free!\n", msg, blk);
+		err(WARN, "%s block %u is marked free!", msg, blk);
 	if (isused(blk))
-		printf("  %s block %u is already used!\n", msg, blk);
+		err(WARN, "%s block %u is already used!", msg, blk);
 	markused(blk);
 }
 
@@ -571,7 +593,7 @@ int seedlingblocks(uchar device, uint keyblk, uint *blkcnt) {
 int saplingblocks(uchar device, uint keyblk, uint *blkcnt) {
 	checkblock(keyblk, "Data");
 	if (readdiskblock(device, keyblk, buf) == -1) {
-		printf("  Error reading blk %u\n", keyblk);
+		err(NONFATAL, "Error reading blk %u", keyblk);
 		return -1;
 	}
 	*blkcnt = 1;
@@ -591,7 +613,7 @@ int saplingblocks(uchar device, uint keyblk, uint *blkcnt) {
 int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
 	checkblock(keyblk, "Tree index");
 	if (readdiskblock(device, keyblk, buf2) == -1) {
-		printf("  Error reading blk %u\n", keyblk);
+		err(NONFATAL, "Error reading blk %u", keyblk);
 		return -1;
 	}
 	*blkcnt = 1;
@@ -615,7 +637,7 @@ int treeblocks(uchar device, uint keyblk, uint *blkcnt) {
 int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 	checkblock(keyblk, "Fork key");
 	if (readdiskblock(device, keyblk, buf3) == -1) {
-		printf("  Error reading blk %u\n", keyblk);
+		err(NONFATAL, "Error reading blk %u", keyblk);
 		return -1;
 	}
 	*blkcnt = 1;
@@ -639,14 +661,16 @@ int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 		treeblocks(device, keyblk, &count);
 		break;
 	default:
-		puts("  Invalid storage type for data fork");
+		err(NONFATAL, "Invalid storage type for data fork");
 		count = 0;
 		break;
 	}
 	if (blks != count) {
 		if (count != 0) {
-			printf("  Data fork size %u is incorrect", blks);
-			printf(", should be %u\n", count);
+			err(NONFATAL,
+			    "Data fork size %u is incorrect, should be %u",
+			    blks, count);
+			// TODO: FIX MODE
 		}
 	}
 	*blkcnt += count;
@@ -669,14 +693,16 @@ int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 		treeblocks(device, keyblk, &count);
 		break;
 	default:
-		puts("  Invalid storage type for resource fork");
+		err(NONFATAL, "Invalid storage type for resource fork");
 		count = 0;
 		break;
 	}
 	if (blks != count) {
 		if (count != 0) {
-			printf("  Resource fork size %u is incorrect", blks);
-			printf(", should be %u\n", count);
+			err(NONFATAL,
+			    "Res fork size %u is incorrect, should be %u",
+			    blks, count);
+			// TODO: FIX MODE
 		}
 	}
 	*blkcnt += count;
@@ -693,7 +719,7 @@ int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
 	if (!dorecurse)
 		checkblock(keyblk, "Directory");
 	if (readdiskblock(device, keyblk, buf) == -1) {
-		printf("  Error reading keyblock %u\n", keyblk);
+		err(NONFATAL, "Error reading keyblock %u", keyblk);
 		return -1;
 	}
 	*blkcnt = 1;
@@ -703,25 +729,29 @@ int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
 	uint parblk = hdr->parptr[0] + 256U * hdr->parptr[1];
 
 	if (parblk != blocknum) {
-		printf("  Bad parent block %u", parblk);
-		printf(", should be %u\n", blocknum);
+		err(NONFATAL, "Bad parent block %u, should be %u",
+		    parblk, blocknum);
+		// TODO: FIX MODE
 	}
 	if (parentry != blkentries) {
-		printf("  Bad parent block entry %u", parentry);
-		printf(", should be %u\n", blkentries);
+		err(NONFATAL, "Bad parent block entry %u, should be %u",
+		    parentry, blkentries);
+		// TODO: FIX MODE
 	}
 	if (parentlen != 0x27)
-		puts("  Bad parent entry length");
+		err(NONFATAL, "Bad parent entry length");
 	char *dirname = buf + 0x05;
-	if (strncmp(dirname, ent->name, NMLEN))
-		puts("  Subdirectory name mismatch");
+	if (strncmp(dirname, ent->name, NMLEN)) {
+		err(NONFATAL,"Subdirectory name mismatch");
+		// TODO: FIX MODE
+	}
 
 	blocknum = buf[0x02] + 256U * buf[0x03];
 	while (blocknum) {
 		if (!dorecurse)
 			checkblock(blocknum, "Directory");
 		if (readdiskblock(device, blocknum, buf) == -1) {
-			printf("  Error reading dir block %u\n", blocknum);
+			err(NONFATAL, "Error reading dir block %u", blocknum);
 			return -1;
 		}
 		++(*blkcnt);
@@ -737,10 +767,8 @@ int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
  */
 void enqueuesubdir(uint blocknum, uint subdiridx) {
 	struct dirblk *p = (struct dirblk*)malloc(sizeof(struct dirblk));
-	if (!p) {
-		puts("** Unable to allocate memory **");
-		exit(3);
-	}
+	if (!p)
+		err(FATALALLOC, "** Unable to allocate memory **");
 	p->blocknum = blocknum;
 	static struct dirblk *prev;
 	if (subdiridx == 0) {     /* First subdir is inserted at head of list */
@@ -760,23 +788,22 @@ void enqueuesubdir(uint blocknum, uint subdiridx) {
  * blocknum is the block number of the first block of the directory
  */
 int readdir(uint device, uint blocknum) {
+	uint errsbefore = errcount;
 	uint blkcnt = 1;
 	uint hdrblknum = blocknum;
 
 	numfiles = 0;
 
 	blocks = (struct block*)malloc(sizeof(struct block));
-	if (!blocks) {
-		puts("** Unable to allocate memory **");
-		exit(3);
-	}
+	if (!blocks)
+		err(FATALALLOC, "** Unable to allocate memory **");
 	struct block *curblk = blocks;
 	curblk->next = NULL;
 	curblk->blocknum = blocknum;
 
 	checkblock(blocknum, "Directory");
 	if (readdiskblock(device, blocknum, curblk->data) == -1) {
-		printf("Error reading dir block %d\n", blkcnt);
+		err(NONFATAL, "Error reading dir block %d", blkcnt);
 		return 1;
 	}
 
@@ -791,7 +818,8 @@ int readdir(uint device, uint blocknum) {
 	        hdr->vers, hdr->minvers, hdr->typ_len & 0x0f);
 
 	hline();
-	printf("Directory %s (%d entries)\n", currdir, filecount);
+	printf("Directory %s (%u", currdir, filecount);
+	printf(" %s)\n", filecount == 1 ? "entry" : "entries");
 	hline();
 
 	/* Copy pointers and header to sorteddata[], zero the rest */
@@ -800,11 +828,11 @@ int readdir(uint device, uint blocknum) {
 
 #ifdef CHECK
 	if (entsz != 0x27) {
-		puts("Error - bad entry size");
+		err(NONFATAL, "Error - bad entry size");
 		return 1;
 	}
 	if (entperblk != 0x0d) {
-		puts("Error - bad entries/block");
+		err(NONFATAL, "Error - bad entries/block");
 		return 1;
 	}
 #endif
@@ -903,8 +931,9 @@ int readdir(uint device, uint blocknum) {
 			uint keyblk = ent->keyptr[0] + 256U * ent->keyptr[1];
 			uint hdrblk = ent->hdrptr[0] + 256U * ent->hdrptr[1];
 			if (hdrblk != hdrblknum) {
-				printf("  Header ptr %u should be %u\n",
-				       hdrblk, hdrblknum);
+				err(NONFATAL, "Header ptr %u, should be %u",
+				    hdrblk, hdrblknum);
+				// TODO: FIX MODE
 			}
 			uint count;
 			switch (ent->typ_len & 0xf0) {
@@ -939,20 +968,23 @@ int readdir(uint device, uint blocknum) {
 				forkblocks(device, keyblk, &count);
 				break;
 			default:
-				printf("  %s: unexpected storage type 0x%x\n",
-				       namebuf, ent->typ_len & 0xf0);
+				err(NONFATAL,
+				    "%s: unexpected storage type 0x%x",
+				     namebuf, ent->typ_len & 0xf0);
 				count = 0;
 			}
 			if (blks != count) {
 				if (count != 0) {
-					printf("  Size %u is incorrect", blks);
-					printf(", should be %u\n", count);
+					err(NONFATAL,
+					    "Size %u is incorrect, "
+					    "should be %u", blks, count);
+					// TODO: FIX MODE
 				}
 			}
 #endif
 			++numfiles;
 			if (numfiles == MAXFILES) {
-				puts("** Too many files! **");
+				err(NONFATAL, "** Too many files! **");
 				return 1;
 			}
 			++entries;
@@ -964,10 +996,9 @@ int readdir(uint device, uint blocknum) {
 			}
 			curblk->next =
 			  (struct block*)malloc(sizeof(struct block));
-			if (!curblk->next) {
-				puts("** Unable to allocate memory **");
-				exit(3);
-			}
+			if (!curblk->next)
+				err(FATALALLOC,
+				    "** Unable to allocate memory **");
 			curblk = curblk->next;
 			curblk->next = NULL;
 			curblk->blocknum = blocknum;
@@ -975,8 +1006,8 @@ int readdir(uint device, uint blocknum) {
 			checkblock(blocknum, "Directory");
 			if ( readdiskblock(device, blocknum,
 			                   curblk->data) == -1) {
-				printf("  Error reading dir block %d\n",
-				       blkcnt);
+				err(NONFATAL,"Error reading dir block %d",
+				    blkcnt);
 				return 1;
 			}
 			/* Copy ptrs to sorteddata[], zero the rest */
@@ -989,9 +1020,12 @@ int readdir(uint device, uint blocknum) {
 			idx += entsz;
 		}
 	}
-	if (filecount != entries)
-		printf("Filecount %u wrong, should be %u\n", filecount, entries);
-	return 0; // TODO: THIS SHOULD BE NUMBER OF ERRORS
+	if (filecount != entries) {
+		err(NONFATAL, "Filecount %u wrong, should be %u",
+		    filecount, entries);
+		// TODO: FIX MODE
+	}
+	return errcount - errsbefore;
 }
 
 /*
@@ -1183,8 +1217,7 @@ void sortlist(char s) {
 		      cmp_eof_desc);
 		break;
 	default:
-		puts("Invalid sort option");
-		exit(2);
+		err(FATALBADARG, "Invalid sort option");
 	}
 }
 
@@ -1193,7 +1226,6 @@ void sortlist(char s) {
  */
 void printlist(void) {
 	hline();
-	printf("numfiles=%u\n", numfiles);
 	fputs("Dirblk Entry Type : Name            : Blocks      EOF ", stdout);
 	if (do_ctime)
 		puts("Created");
@@ -1240,8 +1272,8 @@ uint blockidxtoblocknum(uint idx) {
 void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
 
 	if (dodebug) {
-		printf("  from dirblk %03u entry %02u\n", srcblk, srcent);
-		printf("    to dirblk %03u entry %02u\n", dstblk, dstent);
+		printf("  from dirblk %03u entry %02u", srcblk, srcent);
+		printf("    to dirblk %03u entry %02u", dstblk, dstent);
 	}
 
 	uint parentblk = blockidxtoblocknum(dstblk);
@@ -1306,7 +1338,7 @@ int writedir(uchar device) {
 	struct block *i = blocks;
 	while (i) {
 		if(writediskblock(device, i->blocknum, i->sorteddata) == -1) {
-			printf("Can't write block %u\n", i->blocknum);
+			err(NONFATAL, "Can't write block %u", i->blocknum);
 			return 1;
 		}
 		i = i->next;
@@ -1328,42 +1360,42 @@ void freeblocks(void) {
 }
 
 void usage(void) {
-	prerr("usage: sortdir [-s xxx] [-n x] [-rDwcvVh] path\n");
-	prerr("  Options: -s xxx  Directory sort options");
-	prerr("           -n x    Filename upper/lower case options");
-	prerr("           -r      Recursive descent");
-	prerr("           -D      Whole-disk mode (implies -r)");
-	prerr("           -w      Enable writing to disk");
-	prerr("           -c      Use creation time rather than modification");
-	prerr("           -v      Verbose output");
-	prerr("           -V      Verbose debugging output");
-	prerr("           -h      This help");
-	prerr("");
-	prerr("Upper/lower case option x:");
-	prerr("  l  convert filenames to lower case             eg: read.me");
-	prerr("  u  convert filenames to upper case             eg: READ.ME");
-	prerr("  i  convert filenames to initial upper case     eg: Read.me");
-	prerr("  c  convert filenames to camel case             eg: Read.Me");
-	prerr("");
-	prerr("Directory sort options xxx, is a list of fields on which to");
-	prerr("sort. The sort options are processed left-to-right.");
-	prerr("  n  sort by filename ascending");
-	prerr("  N  sort by filename descending");
-	prerr("  d  sort by modification (or creation [-c]) date ascending");
-	prerr("  D  sort by modification (or creation [-c]) date descending");
-	prerr("  t  sort by type ascending");
-	prerr("  T  sort by type descending");
-	prerr("  f  sort folders (directories) to top");
-	prerr("  F  sort folders (directories) to bottom");
-	prerr("  b  sort by blocks used ascending");
-	prerr("  B  sort by blocks used descending");
-	prerr("  e  sort by EOF position ascending");
-	prerr("  E  sort by EOF position descending");
-	prerr("");
-	prerr("e.g.: sortdir -w -s nf .");
-	prerr("Will sort the current directory first by name (ascending),");
-	prerr("then sort directories to the top, and will write the sorted");
-	prerr("directory to disk.");
+	printf("usage: sortdir [-s xxx] [-n x] [-rDwcvVh] path\n\n");
+	printf("  Options: -s xxx  Directory sort options\n");
+	printf("           -n x    Filename upper/lower case options\n");
+	printf("           -r      Recursive descent\n");
+	printf("           -D      Whole-disk mode (implies -r)\n");
+	printf("           -w      Enable writing to disk\n");
+	printf("           -c      Use create time rather than modify time\n");
+	printf("           -v      Verbose output\n");
+	printf("           -V      Verbose debugging output\n");
+	printf("           -h      This help\n");
+	printf("\n");
+	printf("Upper/lower case option x:\n");
+	printf("  l  convert filenames to lower case           eg: read.me\n");
+	printf("  u  convert filenames to upper case           eg: READ.ME\n");
+	printf("  i  convert filenames to initial upper case   eg: Read.me\n");
+	printf("  c  convert filenames to camel case           eg: Read.Me\n");
+	printf("\n");
+	printf("Directory sort options xxx, is a list of fields on which\n");
+	printf("to sort. The sort options are processed left-to-right.\n");
+	printf("  n  sort by filename ascending\n");
+	printf("  N  sort by filename descending\n");
+	printf("  d  sort by modify (or create [-c]) date ascending\n");
+	printf("  D  sort by modify (or create [-c]) date descending\n");
+	printf("  t  sort by type ascending\n");
+	printf("  T  sort by type descending\n");
+	printf("  f  sort folders (directories) to top\n");
+	printf("  F  sort folders (directories) to bottom\n");
+	printf("  b  sort by blocks used ascending\n");
+	printf("  B  sort by blocks used descending\n");
+	printf("  e  sort by EOF position ascending\n");
+	printf("  E  sort by EOF position descending\n");
+	printf("\n");
+	printf("e.g.: sortdir -w -s nf .\n");
+	printf("Will sort the current directory first by name (ascending),\n");
+	printf("then sort directories to the top, and will write the\n");
+	printf("sorted directory to disk.\n");
 	exit(2);
 }
 
@@ -1373,19 +1405,19 @@ void usage(void) {
  */
 void processdir(uint device, uint blocknum) {
 	flushall();
-	uchar err = readdir(device, blocknum);
+	uchar errs = readdir(device, blocknum);
 	if (doverbose) {
 		printlist();
 	}
-	if (err) {
-		puts("Error scanning directory, will not sort");
+	if (errs) {
+		printf("Error scanning directory, will not sort\n");
 		goto done;
 	}
 	if (strlen(sortopts) > 0) {
 		for (uchar i=0; i<strlen(sortopts); ++i) {
 			if (doverbose) {
 				printf("Sorting - order '%c' ...\n",
-				       sortopts[i]);
+				    sortopts[i]);
 			}
 			sortlist(sortopts[i]);
 		}
@@ -1395,7 +1427,7 @@ void processdir(uint device, uint blocknum) {
 			printlist();
 		}
 		if (dowrite)
-			err = writedir(device);
+			errs = writedir(device);
 		else if (doverbose)
 			puts("Not writing to disk without -w");
 	}
@@ -1421,10 +1453,12 @@ void checkfreeandused(void) {
 			continue;
 		if (isfree(i)) {
 			if (isused(i))
-				printf("Blk %u used, marked free\n", i);
+				err(NONFATAL,
+				    "Block %u used, marked free", i);
 		} else {
 			if (!isused(i))
-				printf("Blk %u unused, not marked free\n", i);
+				err(NONFATAL,
+				    "Block %u unused, not marked free", i);
 		}
 	}
 }
@@ -1494,6 +1528,6 @@ int main(int argc, char *argv[]) {
 		checkfreeandused();
 	free(freelist);
 	free(usedlist);
-	return 0;
+	err(FINISHED, "");
 }
 
