@@ -23,6 +23,10 @@ n: Sort by filename, in ascending ASCII order
 .HP
 N: Sort by filename, in descending ASCII order
 .HP
+i: Sort by filename, in ascending ASCII order - case insensitive
+.HP
+I: Sort by filename, in descending ASCII order - case insensitive
+.HP
 d: Sort by modification date (or creation date if \fB-c\fR flag is given), in ascending order
 .HP
 D: Sort by modification date (or creation date if \fB-c\fR flag is given), in descending order

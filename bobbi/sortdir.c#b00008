@@ -2,7 +2,6 @@
  * Bobbi January-February 2020
  *
  * TODO: Fix mode
- * TODO: Case insensitive sort option
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
@@ -184,6 +183,8 @@ void enqueuesubdir(uint blocknum, uint subdiridx);
 int  readdir(uint device, uint blocknum);
 int  cmp_name_asc(const void *a, const void *b);
 int  cmp_name_desc(const void *a, const void *b);
+int  cmp_name_asc_ci(const void *a, const void *b);
+int  cmp_name_desc_ci(const void *a, const void *b);
 int  cmp_datetime_asc(const void *a, const void *b);
 int  cmp_datetime_desc(const void *a, const void *b);
 int  cmp_type_asc(const void *a, const void *b);
@@ -1033,7 +1034,7 @@ int readdir(uint device, uint blocknum) {
  */
 int cmp_name_asc(const void *a, const void *b) {
 	return strncmp(((struct fileent*)a)->name,
-	             ((struct fileent*)b)->name, NMLEN);
+	               ((struct fileent*)b)->name, NMLEN);
 }
 
 /*
@@ -1042,6 +1043,22 @@ int cmp_name_asc(const void *a, const void *b) {
 int cmp_name_desc(const void *a, const void *b) {
 	return strncmp(((struct fileent*)b)->name,
 	               ((struct fileent*)a)->name, NMLEN);
+}
+
+/*
+ * Compare - filename sort in ascending order - case insensitive
+ */
+int cmp_name_asc_ci(const void *a, const void *b) {
+	return strncasecmp(((struct fileent*)a)->name,
+	                   ((struct fileent*)b)->name, NMLEN);
+}
+
+/*
+ * Compare - filename sort in descending order - case insensitive
+ */
+int cmp_name_desc_ci(const void *a, const void *b) {
+	return strncasecmp(((struct fileent*)b)->name,
+	                   ((struct fileent*)a)->name, NMLEN);
 }
 
 /*
@@ -1184,6 +1201,14 @@ void sortlist(char s) {
 	case 'N':
 		qsort(filelist, numfiles, sizeof(struct fileent),
 		      cmp_name_desc);
+		break;
+	case 'i':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_name_asc_ci);
+		break;
+	case 'I':
+		qsort(filelist, numfiles, sizeof(struct fileent),
+		      cmp_name_desc_ci);
 		break;
 	case 'd':
 		qsort(filelist, numfiles, sizeof(struct fileent),
@@ -1394,6 +1419,8 @@ void usage(void) {
 	printf("to sort. The sort options are processed left-to-right.\n");
 	printf("  n  sort by filename ascending\n");
 	printf("  N  sort by filename descending\n");
+	printf("  i  sort by filename ascending - case insensitive\n");
+	printf("  I  sort by filename descending - case insensitive\n");
 	printf("  d  sort by modify (or create [-c]) date ascending\n");
 	printf("  D  sort by modify (or create [-c]) date descending\n");
 	printf("  t  sort by type ascending\n");
@@ -1454,12 +1481,14 @@ done:
  * block should either be marked free or marked used.
  */
 void checkfreeandused(void) {
-	printf("Total blocks on volume %u\n", totblks);
+	printf("Total blocks on volume\t%u\n", totblks);
 	uint freeblks = 0;
 	for (uint i=0; i<totblks; ++i)
 		if (isfree(i))
 			++freeblks;
-	printf("Free blocks on volume %u\n", freeblks);
+	printf("Free blocks on volume\t%u\n", freeblks);
+	printf("Percentage full\t\t%.1f\n",
+	       100.0 * (float)(totblks - freeblks) / totblks);
 	for (uint i=0; i<totblks; ++i) {
 		uint idx = i / 8;
 		if (!(freelist[idx] ^ usedlist[i]))	/* Speed-up */
