@@ -1,7 +1,6 @@
 /*
  * Bobbi January-February 2020
  *
- * TODO: Fix mode
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
@@ -156,6 +155,7 @@ static uchar dodebug = 0;        /* -V very verbose option */
 static uchar do_ctime = 0;       /* -k ctime option */
 static char sortopts[5] = "";    /* -s:abc list of sort options */
 static char caseopts[2] = "";    /* -c:x case conversion option */
+static char fixopts[2] = "";     /* -f:x fix mode option */
 
 /* Prototypes */
 void hline(void);
@@ -168,8 +168,11 @@ void lowercase(char *p, uchar len, uchar *minvers, uchar *vers);
 void uppercase(char *p, uchar len, uchar *minvers, uchar *vers);
 void initialcase(uchar mode, char *p, uchar len, uchar *minvers, uchar *vers);
 void convertdatetime(uchar time[4], struct datetime *dt);
+uint askfix(void);
 int  readfreelist(uchar device);
 int  isfree(uint blk);
+void markfree(uint blk);
+void marknotfree(uint blk);
 int  isused(uint blk);
 void markused(uint blk);
 void checkblock(uint blk, char *msg);
@@ -502,6 +505,26 @@ void convertdatetime(uchar time[4], struct datetime *dt) {
 }
 
 /*
+ * Determine whether or not to perform a fix
+ * Return 0 not to perform fix, 1 to perform fix
+ */
+uint askfix(void) {
+	if (strlen(fixopts) == 0)
+		return 0;
+	switch (fixopts[0]) {
+	case '?':
+		fputs("Fix (y/n)? ", stdout);
+		if (tolower(getchar()) == 'y')
+			return 1;
+		return 0;
+	case 'y':
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+/*
  * Read the free list
  */
 int readfreelist(uchar device) {
@@ -546,6 +569,24 @@ int isfree(uint blk) {
 	uint idx = blk / 8;
 	uint bit = blk % 8;
 	return (freelist[idx] << bit) & 0x80 ? 1 : 0;
+}
+
+/*
+ * Mark a block as free
+ */
+void markfree(uint blk) {
+	uint idx = blk / 8;
+	uint bit = blk % 8;
+	freelist[idx] |= (0x80 >> bit);
+}
+
+/*
+ * Mark a block as not free
+ */
+void marknotfree(uint blk) {
+	uint idx = blk / 8;
+	uint bit = blk % 8;
+	freelist[idx] &= ~(0x80 >> bit);
 }
 
 /*
@@ -671,7 +712,10 @@ int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 			err(NONFATAL,
 			    "Data fork size %u is incorrect, should be %u",
 			    blks, count);
-			// TODO: FIX MODE
+			if (askfix() == 1) {
+				buf3[0x03] = count & 0xff;
+				buf3[0x04] = (count >> 8) & 0xff;
+			}
 		}
 	}
 	*blkcnt += count;
@@ -703,7 +747,10 @@ int forkblocks(uchar device, uint keyblk, uint *blkcnt) {
 			err(NONFATAL,
 			    "Res fork size %u is incorrect, should be %u",
 			    blks, count);
-			// TODO: FIX MODE
+			if (askfix() == 1) {
+				buf3[0x103] = count & 0xff;
+				buf3[0x104] = (count >> 8) & 0xff;
+			}
 		}
 	}
 	*blkcnt += count;
@@ -732,19 +779,30 @@ int  subdirblocks(uchar device, uint keyblk, struct pd_dirent *ent,
 	if (parblk != blocknum) {
 		err(NONFATAL, "Bad parent block %u, should be %u",
 		    parblk, blocknum);
-		// TODO: FIX MODE
+		if (askfix() == 1) {
+			hdr->parptr[0] = blocknum & 0xff;
+			hdr->parptr[1] = (blocknum >> 8) & 0xff;
+		}
 	}
+
+	skipfix:
+
 	if (parentry != blkentries) {
 		err(NONFATAL, "Bad parent block entry %u, should be %u",
 		    parentry, blkentries);
-		// TODO: FIX MODE
+		if (askfix() == 1) {
+			hdr->parentry = blkentries;
+		}
 	}
-	if (parentlen != 0x27)
+	if (parentlen != 0x27) {
 		err(NONFATAL, "Bad parent entry length");
+		if (askfix() == 1) {
+			hdr->parentlen = 0x27;
+		}
+	}
 	char *dirname = buf + 0x05;
 	if (strncmp(dirname, ent->name, NMLEN)) {
 		err(NONFATAL,"Subdirectory name mismatch");
-		// TODO: FIX MODE
 	}
 
 	blocknum = buf[0x02] + 256U * buf[0x03];
@@ -813,7 +871,6 @@ int readdir(uint device, uint blocknum) {
 	entsz           = hdr->entlen;
 	entperblk       = hdr->entperblk;
 	uint filecount  = hdr->filecnt[0] + 256U * hdr->filecnt[1];
-
 
 	fixcase(hdr->name, currdir,
 	        hdr->vers, hdr->minvers, hdr->typ_len & 0x0f);
@@ -934,7 +991,10 @@ int readdir(uint device, uint blocknum) {
 			if (hdrblk != hdrblknum) {
 				err(NONFATAL, "Header ptr %u, should be %u",
 				    hdrblk, hdrblknum);
-				// TODO: FIX MODE
+				if (askfix() == 1) {
+					ent->hdrptr[0] = hdrblknum & 0xff;
+					ent->hdrptr[1] = (hdrblknum >> 8)&0xff;
+				}
 			}
 			uint count;
 			switch (ent->typ_len & 0xf0) {
@@ -959,9 +1019,7 @@ int readdir(uint device, uint blocknum) {
 			case 0x40:
 				/* Pascal area */
 				puts(" Pascal area!!");
-				//
 				// TODO: Check name is PASCAL.AREA type 0xef
-				//
 				count = 0;
 				break;
 			case 0x50:
@@ -977,9 +1035,13 @@ int readdir(uint device, uint blocknum) {
 			if (blks != count) {
 				if (count != 0) {
 					err(NONFATAL,
-					    "Size %u is incorrect, "
+					    "Blocks used %u is incorrect, "
 					    "should be %u", blks, count);
-					// TODO: FIX MODE
+					if (askfix() == 1) {
+						ent->blksused[0] = count&0xff;
+						ent->blksused[1] =
+						  (count >> 8) & 0xff;
+					}
 				}
 			}
 #endif
@@ -1024,7 +1086,10 @@ int readdir(uint device, uint blocknum) {
 	if (filecount != entries) {
 		err(NONFATAL, "Filecount %u wrong, should be %u",
 		    filecount, entries);
-		// TODO: FIX MODE
+		if (askfix() == 1) {
+			hdr->filecnt[0] = entries & 0xff;
+			hdr->filecnt[1] = (entries >> 8) & 0xff;
+		}
 	}
 	return errcount - errsbefore;
 }
@@ -1401,6 +1466,7 @@ void usage(void) {
 	printf("usage: sortdir [-s xxx] [-n x] [-rDwcvVh] path\n\n");
 	printf("  Options: -s xxx  Directory sort options\n");
 	printf("           -n x    Filename upper/lower case options\n");
+	printf("           -f x    Fix mode\n");
 	printf("           -r      Recursive descent\n");
 	printf("           -D      Whole-disk mode (implies -r)\n");
 	printf("           -w      Enable writing to disk\n");
@@ -1431,6 +1497,11 @@ void usage(void) {
 	printf("  B  sort by blocks used descending\n");
 	printf("  e  sort by EOF position ascending\n");
 	printf("  E  sort by EOF position descending\n");
+	printf("\n");
+	printf("Fix mode options x:\n");
+	printf("  ?  prompt for each fix\n");
+	printf("  n  never fix\n");
+	printf("  y  always fix (be careful!)\n");
 	printf("\n");
 	printf("e.g.: sortdir -w -s nf .\n");
 	printf("Will sort the current directory first by name (ascending),\n");
@@ -1494,24 +1565,31 @@ void checkfreeandused(void) {
 		if (!(freelist[idx] ^ usedlist[i]))	/* Speed-up */
 			continue;
 		if (isfree(i)) {
-			if (isused(i))
+			if (isused(i)) {
 				err(NONFATAL,
 				    "Block %u used, marked free", i);
+				if (askfix() == 1)
+					marknotfree(i);
+			}
 		} else {
-			if (!isused(i))
+			if (!isused(i)) {
 				err(NONFATAL,
 				    "Block %u unused, not marked free", i);
+				if (askfix() == 1)
+					markfree(i);
+			}
 		}
 	}
 }
 
 int main(int argc, char *argv[]) {
+
 	if (argc < 2) {
 		usage();
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "cDrwvVs:n:h")) != -1) {
+	while ((opt = getopt(argc, argv, "cDrwvVs:n:f:h")) != -1) {
 		switch (opt) {
 		case 'c':
 			do_ctime = 1;
@@ -1538,6 +1616,9 @@ int main(int argc, char *argv[]) {
 		case 'n':
 			strncpy(caseopts, optarg, 1);
 			break;
+		case 'f':
+			strncpy(fixopts, optarg, 1);
+			break;
 		case 'h':
 		default:
 			usage();
@@ -1547,7 +1628,8 @@ int main(int argc, char *argv[]) {
 	if (optind != argc - 1)
 		usage();
 
-	if ((strlen(caseopts) > 0) && (strlen(sortopts) == 0))
+	if (((strlen(caseopts) > 0) || (strlen(fixopts) > 0)) &&
+	     (strlen(sortopts) == 0))
 		strncpy(sortopts, ".", 1);
 
 	uchar dev;
