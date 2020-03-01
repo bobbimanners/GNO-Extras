@@ -880,9 +880,9 @@ int readdir(uint device, uint blocknum) {
 	printf(" %s)\n", filecount == 1 ? "entry" : "entries");
 	hline();
 
-	/* Copy pointers and header to sorteddata[], zero the rest */
+	/* Copy pointers to sorteddata[], zero the rest */
 	bzero(curblk->sorteddata, BLKSZ);
-	memcpy(curblk->sorteddata, curblk->data, PTRSZ + entsz);
+	memcpy(curblk->sorteddata, curblk->data, PTRSZ);
 
 #ifdef CHECK
 	if (entsz != 0x27) {
@@ -1420,6 +1420,7 @@ void copyent(uint srcblk, uint srcent, uint dstblk, uint dstent, uint device) {
  * blocks.  Note that the block and entry numbers are 1-based indices.
  */
 void sortblocks(uint device) {
+	copyent(1, 1, 1, 1, device); /* Copy directory header */
 	uchar destblk = 1;
 	uchar destentry = 2; /* Skip header on first block */
 	for(uint i=0; i<numfiles; ++i) {
@@ -1520,7 +1521,7 @@ void processdir(uint device, uint blocknum) {
 	if (doverbose) {
 		printlist();
 	}
-	if (errs) {
+	if ((strlen(fixopts) == 0) && errs) {
 		printf("Error scanning directory, will not sort\n");
 		goto done;
 	}
@@ -1537,9 +1538,11 @@ void processdir(uint device, uint blocknum) {
 			puts("After sorting ...");
 			printlist();
 		}
-		if (dowrite)
+		if (dowrite) {
+			hline();
+			puts("Writing modified directory to disk");
 			errs = writedir(device);
-		else if (doverbose)
+		} else
 			puts("Not writing to disk without -w");
 	}
 done:
