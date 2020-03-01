@@ -2,7 +2,6 @@
  * Bobbi January-February 2020
  *
  * TODO: Tool for 'extending' volume dir to more than 4 blocks
- * TODO: Legacy/extended date format conversion
  * TODO: Trimming unused directory blocks
  * TODO: Make a version that doesn't need GNO - eliminate call to stat()
  */
@@ -156,6 +155,7 @@ static uchar do_ctime = 0;       /* -k ctime option */
 static char sortopts[5] = "";    /* -s:abc list of sort options */
 static char caseopts[2] = "";    /* -c:x case conversion option */
 static char fixopts[2] = "";     /* -f:x fix mode option */
+static char dateopts[2] = "";    /* -d:x date conversion option */
 
 /* Prototypes */
 void hline(void);
@@ -167,7 +167,8 @@ void fixcase(char *in, char *out, uchar minvers, uchar vers, uchar len);
 void lowercase(char *p, uchar len, uchar *minvers, uchar *vers);
 void uppercase(char *p, uchar len, uchar *minvers, uchar *vers);
 void initialcase(uchar mode, char *p, uchar len, uchar *minvers, uchar *vers);
-void convertdatetime(uchar time[4], struct datetime *dt);
+void readdatetime(uchar time[4], struct datetime *dt);
+void writedatetime(uchar pd25, struct datetime *dt, uchar time[4]);
 uint askfix(void);
 int  readfreelist(uchar device);
 int  isfree(uint blk);
@@ -478,7 +479,7 @@ ret:
  * Supports the legacy ProDOS date/time format as used by ProDOS 1.0->2.4.0
  * and also the new format introduced with ProDOS 2.5.
  */
-void convertdatetime(uchar time[4], struct datetime *dt) {
+void readdatetime(uchar time[4], struct datetime *dt) {
 	uint d = time[0] + 256U * time[1];
 	uint t = time[2] + 256U * time[3];
 	if (!(t & 0xe000)) {
@@ -502,6 +503,38 @@ void convertdatetime(uchar time[4], struct datetime *dt) {
 		dt->minute = d & 0x003f;
 		dt->ispd25format = 1;
 	}
+}
+
+/*
+ * Write the date and time stored in struct datetime in ProDOS on disk format,
+ * storing the bytes in array time[].  If pd25 is 0 then use legacy format
+ * (ProDOS 1.0-2.4.2) otherwise use the new date and time format introduced
+ * with ProDOS 2.5
+ */
+void writedatetime(uchar pd25, struct datetime *dt, uchar time[4]) {
+	uint d, t;
+	if (pd25 == 0) {
+		/* ProDOS 1.0 to 2.4.2 date format */
+		uint year = dt->year;
+		if (year > 2039)		/* 2039 is last year */
+			year = 2039;
+		if (year < 1940)		/* 1940 is first year */
+			year = 1940;
+		if (year >= 2000)
+			year -= 2000;
+		if (year >= 1900)
+			year -= 1900;
+		d = (year << 9) | (dt->month << 5) | dt->day; 
+		t = (dt->hour << 8) | dt->minute;
+	} else {
+		/* ProDOS 2.5.0+ */
+		t = ((dt->month + 1) << 12) | dt->year;
+		d = (dt->day << 11) | (dt->hour << 6) | dt->minute; 
+	}
+	time[0] = d & 0xff;
+	time[1] = (d >> 8) & 0xff;
+	time[2] = t & 0xff;
+	time[3] = (t >> 8) & 0xff;
 }
 
 /*
@@ -931,7 +964,28 @@ int readdir(uint device, uint blocknum) {
 			                            &(ent->vers),
 					            &(ent->minvers));
 					break;
+				default:
+					err(FATALBADARG, "Invalid case option");
 				}
+			}
+
+			if (strlen(dateopts) > 0) {
+				struct datetime ctime, mtime;
+				readdatetime(ent->ctime, &ctime);
+				readdatetime(ent->mtime, &mtime);
+				uchar pd25;
+				switch (dateopts[0]) {
+				case 'n':
+					pd25 = 1;
+					break;
+				case 'o':
+					pd25 = 0;
+					break;
+				default:
+					err(FATALBADARG, "Invalid date option");
+				}
+				writedatetime(pd25, &ctime, ent->ctime);
+				writedatetime(pd25, &mtime, ent->mtime);
 			}
 
 			static char namebuf[NMLEN+1];
@@ -978,8 +1032,7 @@ int readdir(uint device, uint blocknum) {
 			filelist[numfiles].eof = eof;
 
 			struct datetime dt;
-			convertdatetime(do_ctime ? ent->ctime : ent->mtime,
-			                &dt);
+			readdatetime(do_ctime ? ent->ctime : ent->mtime, &dt);
 			sprintf(filelist[numfiles].datetime,
 			        "%04d-%02d-%02d %02d:%02d %s",
 			        dt.year, dt.month, dt.day, dt.hour, dt.minute,
@@ -1467,6 +1520,7 @@ void usage(void) {
 	printf("usage: sortdir [-s xxx] [-n x] [-rDwcvVh] path\n\n");
 	printf("  Options: -s xxx  Directory sort options\n");
 	printf("           -n x    Filename upper/lower case options\n");
+	printf("           -d x    Date format conversion options\n");
 	printf("           -f x    Fix mode\n");
 	printf("           -r      Recursive descent\n");
 	printf("           -D      Whole-disk mode (implies -r)\n");
@@ -1476,14 +1530,18 @@ void usage(void) {
 	printf("           -V      Verbose debugging output\n");
 	printf("           -h      This help\n");
 	printf("\n");
-	printf("Upper/lower case option x:\n");
+	printf("-nx: Upper/lower case filenames, where x is:\n");
 	printf("  l  convert filenames to lower case           eg: read.me\n");
 	printf("  u  convert filenames to upper case           eg: READ.ME\n");
 	printf("  i  convert filenames to initial upper case   eg: Read.me\n");
 	printf("  c  convert filenames to camel case           eg: Read.Me\n");
 	printf("\n");
-	printf("Directory sort options xxx, is a list of fields on which\n");
-	printf("to sort. The sort options are processed left-to-right.\n");
+	printf("-dx: Date/time on-disk format conversion, where x is:\n");
+	printf("  n  convert to new (ProDOS 2.5+) format\n");
+	printf("  o  convert to old (ProDOS 1.0-2.4.2, GSOS) format\n");
+	printf("\n");
+	printf("-sxxx: Dir sort, where xxx is a list of fields to sort\n");
+	printf("on. The sort options are processed left-to-right.\n");
 	printf("  n  sort by filename ascending\n");
 	printf("  N  sort by filename descending\n");
 	printf("  i  sort by filename ascending - case insensitive\n");
@@ -1499,7 +1557,7 @@ void usage(void) {
 	printf("  e  sort by EOF position ascending\n");
 	printf("  E  sort by EOF position descending\n");
 	printf("\n");
-	printf("Fix mode options x:\n");
+	printf("-fx: Fix mode, where x is:\n");
 	printf("  ?  prompt for each fix\n");
 	printf("  n  never fix\n");
 	printf("  y  always fix (be careful!)\n");
@@ -1592,7 +1650,7 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "cDrwvVs:n:f:h")) != -1) {
+	while ((opt = getopt(argc, argv, "cDrwvVs:n:f:d:h")) != -1) {
 		switch (opt) {
 		case 'c':
 			do_ctime = 1;
@@ -1622,6 +1680,9 @@ int main(int argc, char *argv[]) {
 		case 'f':
 			strncpy(fixopts, optarg, 1);
 			break;
+		case 'd':
+			strncpy(dateopts, optarg, 1);
+			break;
 		case 'h':
 		default:
 			usage();
@@ -1631,8 +1692,8 @@ int main(int argc, char *argv[]) {
 	if (optind != argc - 1)
 		usage();
 
-	if (((strlen(caseopts) > 0) || (strlen(fixopts) > 0)) &&
-	     (strlen(sortopts) == 0))
+	if (((strlen(caseopts) > 0) || (strlen(fixopts) > 0) ||
+	     (strlen(dateopts) > 0)) && (strlen(sortopts) == 0))
 		strncpy(sortopts, ".", 1);
 
 	uchar dev;
