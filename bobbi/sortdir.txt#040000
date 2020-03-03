@@ -1,0 +1,264 @@
+
+
+SORTDIR (1)            Commands and Applications             SORTDIR (1)
+
+
+
+
+NAME  
+        sortdir  -  tool for sorting directories, converting the case of
+        filenames, converting timestamps and testing  the  integrity  of
+        individual directories or entire ProDOS filesystems 
+
+SYNOPSIS  
+        sortdir [-s xxx -n x -d x -f x -rDwcvVh] directory 
+
+DESCRIPTION  
+        The  sortdir  utility  provides tools for sorting and compacting
+        ProDOS and GSOS  directories  on  disk  and  performs  integrity
+        checking  of  the  structure  of  directories  and entire ProDOS
+        filesystems.  sortdir is also able to convert filenames to upper 
+        case, lower case or initial  capital  letters.    The  directory
+        argument is the starting directory.  
+
+
+        OPTIONS  
+
+
+        -s xxx  
+                Sorts  the  ProDOS directory (or directories if -r or -D
+                is specified.) A sequence of letters  following  the  -s
+                flag  specifies  a  sequence of sorting operations to be
+                performed.  The directory will be  sorted  according  to
+                these sort  fields  in sequence from left to right.  The
+                sorting options are as follows: 
+
+                n: Sort by filename, in ascending ASCII order 
+
+                N: Sort by filename, in descending ASCII order 
+
+                i: Sort by filename, in ascending  ASCII  order  -  case
+                insensitive 
+
+                I:  Sort  by  filename, in descending ASCII order - case
+                insensitive 
+
+                d: Sort by modification date (or  creation  date  if  -c
+                flag is given), in ascending order 
+
+                D:  Sort  by  modification  date (or creation date if -c
+                flag is given), in descending order 
+
+                t: Sort by file type, in ascending order 
+
+                T: Sort by file type, in descending order 
+
+                f: Sort with folders (directories) at the top 
+
+                F: Sort with folders (directories) at the bottom 
+
+                b: Sort by blocks used in ascending order 
+
+
+
+GNO                           Feb 19 2020                         Page 1
+
+
+
+
+SORTDIR (1)            Commands and Applications             SORTDIR (1)
+
+
+
+                B: Sort by blocks used in descending order 
+
+                e: Sort by EOF position in ascending order 
+
+                E: Sort by EOF position in descending order 
+
+        -n x  
+                Modify the case of ProDOS filenames,  according  to  the
+                option flag following the -n flag, as follows: 
+
+                l: Convert filenames to lower case (eg: read.me) 
+
+                u: Convert filenames to upper case (eg: READ.ME) 
+
+                i: Convert filenames to initial upper case (eg: Read.me) 
+
+                c: Convert filenames to camel case (eg: Read.Me) 
+
+        -d x  
+                Modify  the  on-disk  format  of  the  modification  and
+                creation time  fields,  according  to  the  option  flag
+                following the -d flag, as follows: 
+
+                o:  Convert  mtime and ctime fields to the old date/time
+                format used from ProDOS 1.0 to 2.4.2 and all versions of 
+                GSOS.  
+
+                n: Convert mtime and ctime fields to the  new  date/time
+                format used by ProDOS 2.5 and newer versions.  
+
+        -f x  
+                Enables  'fix  mode'  which attempts to fix inconsistent
+                information in the directory  structure.    The  options
+                that may be passed following -f are as follows: 
+
+                y: Answer  'yes' to all prompts.  Be careful, this could
+                be dangerous!  
+
+                n: Answer 'no' to all  prompts.    No  repairs  will  be
+                attempted.  
+
+                ?: Prompt y/n for each potential repair.  
+
+        -r  
+                Enables the  recursive  descent  option.    When  -r  is
+                specified, the sortdir utility will process the starting 
+                directory  and  will  then   recursively   process   all
+                subdirectories in a depth-first manner.  
+
+        -D  
+                Enables the  'whole volume' mode.  This mode implies -r.
+                Whole volume  mode  processes  all  directories  on  the
+                entire   ProDOS   or  GSOS  volume,  starting  from  the
+                top-level volume directory.  The starting  directory  is
+
+
+
+GNO                           Feb 19 2020                         Page 2
+
+
+
+
+SORTDIR (1)            Commands and Applications             SORTDIR (1)
+
+
+
+                used only to determine which volume to process.  Because 
+                whole  disk  mode scans the entire volume this mode also
+                performs  checking  there  are  no  blocks   marked   as
+                allocated on the free list which are in fact unused.  
+
+        -w  
+                Enables writing  changes to disk.  The default is not to
+                write anything to disk, so this option must be specified 
+                explicitly.  
+
+        -c  
+                Display the creation time of the files rather  than  the
+                modification time.    If  -c  is specified then the date
+                sorting options -sd and -sD will also use creation  time
+                instead of modification time.  
+
+        -v  
+                Enable verbose  output.    This  flag provides much more
+                detailed reporting.  
+
+        -V  
+                Enable verbose debugging output.  This is  intended  for
+                developer use only.  
+
+        -h  
+                Display brief usage information.  
+
+        The  sortdir  utility  exits  0  on  success, and >0 if an error
+        occurs.  
+
+USAGE  
+        sortdir is extremely powerful and supports  many  different  use
+        cases.  A few examples are given here.  
+
+        sortdir -snf -w .  
+
+        Sort  the current directory by filename in ascending order, then
+        sort the folders to  the  top.    Write  the  changes  to  disk,
+        updating the current directory.  
+
+        sortdir -rv /H1 
+
+        Recursively check all directories under volume /H1, with verbose 
+        output enabled.  
+
+        sortdir -Dv .  
+
+        Do  whole-volume  check  on  the  current volume, which includes
+        checking that no blocks are allocated to more than one  file  or
+        directory  and  that all free blocks are listed on the freelist.
+        Enable verbose output.  
+
+        sortdir -rc -sD -cl -w /bobbi/devel 
+
+
+
+
+GNO                           Feb 19 2020                         Page 3
+
+
+
+
+SORTDIR (1)            Commands and Applications             SORTDIR (1)
+
+
+
+        Sort  all  directories   under   /bobbi/devel   recursively   in
+        descending order  of  creation  time.   Convert all filenames to
+        lower case.  Write the changes to disk.  
+
+WARNINGS  
+        When the -w  option  is  used  to  write  changes  to  disk  any
+        malfunction of the  sortdir utility could cause severe directory 
+        or  disk  volume  corruption,  which  could result in data loss.
+        Always backup any important disks before using sortdir in  write
+        mode.  
+
+        The  -w  option  must be passed in order to write any changes to
+        disk, including repairs made using the -f 'fix mode'.  
+
+AUTHOR  
+        Bobbi Webber-Manners. bobbi.manners@gmail.com.  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+GNO                           Feb 19 2020                         Page 4
+
+
