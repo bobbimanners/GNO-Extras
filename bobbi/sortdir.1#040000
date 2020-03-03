@@ -1,9 +1,9 @@
 .TH SORTDIR 1 "Feb 19 2020" "GNO" "Commands and Applications"
 .SH NAME
 .BR sortdir
-\- tool for sorting directories, converting the case of filenames and/or testing the integrity of individual directories or entire ProDOS filesystems
+\- tool for sorting directories, converting the case of filenames, converting timestamps and testing the integrity of individual directories or entire ProDOS filesystems
 .SH SYNOPSIS
-.BR sortdir " [" "-s xxx -n x -rDwcvVh" ]
+.BR sortdir " [" "-s xxx -n x -d x -f x -rDwcvVh" ]
 .IR directory
 .SH DESCRIPTION
 The
@@ -58,6 +58,22 @@ i: Convert filenames to initial upper case (eg: Read.me)
 .HP
 c: Convert filenames to camel case (eg: Read.Me)
 
+.IP \fB-d x\fR
+Modify the on-disk format of the modification and creation time fields, according to the option flag following the \fB-d\fR flag, as follows:
+.HP
+o: Convert mtime and ctime fields to the old date/time format used from ProDOS 1.0 to 2.4.2 and all versions of GSOS.
+.HP
+n: Convert mtime and ctime fields to the new date/time format used by ProDOS 2.5 and newer versions.
+
+.IP \fB-f x\fR
+Enables 'fix mode' which attempts to fix inconsistent information in the directory structure.  The options that may be passed following \fB-f\fR are as follows:
+.HP
+y: Answer 'yes' to all prompts.  Be careful, this could be dangerous!
+.HP
+n: Answer 'no' to all prompts.  No repairs will be attempted.
+.HP
+?: Prompt y/n for each potential repair.
+
 .IP \fB-r\fR
 Enables the recursive descent option. When \fB-r\fR is specified, the
 .BR sortdir
@@ -104,5 +120,7 @@ When the \fB-w\fR option is used to write changes to disk any malfunction of the
 utility could cause severe directory or disk volume corruption, which could result in data loss. Always backup any important disks before using
 .BR sortdir
 in write mode.
+.PP
+The \fB-w\fR option must be passed in order to write any changes to disk, including repairs made using the \fB-f\fR 'fix mode'.
 .SH AUTHOR
 Bobbi Webber-Manners. bobbi.manners@gmail.com.
