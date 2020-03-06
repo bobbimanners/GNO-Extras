@@ -11,6 +11,7 @@ This all purpose disk utility can perform a number of useful functions on ProDOS
 - Multi level directory sort by name, size, ctime, mtime, type, folders to top etc.
 - Filename case conversion to upper, lower, initial capital or camel case
 - ctime / mtime datestamp conversion from ProDOS 1.0-2.4.2 to ProDOS 2.5+ format and vice versa
+- Zero free space
 
 See the manpage *sortdir.1* for more info.
 
