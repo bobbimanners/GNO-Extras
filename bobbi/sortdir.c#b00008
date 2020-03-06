@@ -1,7 +1,6 @@
 /*
  * Bobbi January-February 2020
  *
- * TODO: Tool for 'extending' volume dir to more than 4 blocks
  * TODO: Trimming unused directory blocks
  * TODO: Make a version that doesn't need GNO - eliminate call to stat()
  */
@@ -152,6 +151,7 @@ static uchar dowrite = 0;        /* -w write option */
 static uchar doverbose = 0;      /* -v verbose option */
 static uchar dodebug = 0;        /* -V very verbose option */
 static uchar do_ctime = 0;       /* -k ctime option */
+static uchar dozero = 0;         /* -z zero free blocks option */
 static char sortopts[5] = "";    /* -s:abc list of sort options */
 static char caseopts[2] = "";    /* -c:x case conversion option */
 static char fixopts[2] = "";     /* -f:x fix mode option */
@@ -209,7 +209,9 @@ int  writedir(uchar device);
 void freeblocks(void);
 void usage(void);
 void processdir(uint device, uint blocknum);
-void checkfreeandused(void);
+void checkfreeandused(uchar device);
+void zeroblock(uchar device, uint blocknum);
+void zerofreeblocks(uchar device, uint freeblks);
 
 /* Horizontal line */
 void hline(void) {
@@ -1526,6 +1528,7 @@ void usage(void) {
 	printf("           -D      Whole-disk mode (implies -r)\n");
 	printf("           -w      Enable writing to disk\n");
 	printf("           -c      Use create time rather than modify time\n");
+	printf("           -z      Zero free space\n");
 	printf("           -v      Verbose output\n");
 	printf("           -V      Verbose debugging output\n");
 	printf("           -h      This help\n");
@@ -1612,7 +1615,7 @@ done:
  * If we have visited all files and directories on the volume, every
  * block should either be marked free or marked used.
  */
-void checkfreeandused(void) {
+void checkfreeandused(uchar device) {
 	printf("Total blocks on volume\t%u\n", totblks);
 	uint freeblks = 0;
 	for (uint i=0; i<totblks; ++i)
@@ -1641,6 +1644,45 @@ void checkfreeandused(void) {
 			}
 		}
 	}
+	if (dozero)
+		zerofreeblocks(device, freeblks);
+}
+
+/*
+ * Zero block blocknum
+ */
+void zeroblock(uchar device, uint blocknum) {
+	bzero(buf, BLKSZ);
+	DIORecGS dr;
+	dr.pCount = 6;
+	dr.devNum = device;
+	dr.buffer = buf;
+	dr.requestCount = BLKSZ;
+	dr.startingBlock = blocknum;
+	dr.blockSize = BLKSZ;
+	DWriteGS(&dr);
+	if (dr.transferCount != BLKSZ)
+		err(FATAL, "Block write failed");
+}
+
+/*
+ * Zero all free blocks on the volume
+ */
+void zerofreeblocks(uchar device, uint freeblks) {
+	puts("Zeroing free blocks ...");
+	uint step = freeblks / 60;
+	uint ctr = 0;
+	for (uint i=0; i<totblks; ++i)
+		if (isfree(i)) {
+			zeroblock(device, i);
+			++ctr;
+			if (ctr == step) {
+				putchar('=');
+				fflush(stdout);
+				ctr = 0;
+			}
+		}
+	puts("\nDone zeroing!");
 }
 
 int main(int argc, char *argv[]) {
@@ -1650,7 +1692,7 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 	int opt;
-	while ((opt = getopt(argc, argv, "cDrwvVs:n:f:d:h")) != -1) {
+	while ((opt = getopt(argc, argv, "cDrwvVzs:n:f:d:h")) != -1) {
 		switch (opt) {
 		case 'c':
 			do_ctime = 1;
@@ -1670,6 +1712,11 @@ int main(int argc, char *argv[]) {
 			break;
 		case 'V':
 			dodebug = 1;
+			break;
+		case 'z':
+			dozero = 1;
+			dowholedisk = 1;
+			dorecurse = 1;
 			break;
 		case 's':
 			strncpy(sortopts, optarg, 5);
@@ -1716,7 +1763,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 	if (dowholedisk)
-		checkfreeandused();
+		checkfreeandused(dev);
 	free(freelist);
 	free(usedlist);
 	err(FINISHED, "");
